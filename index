@@ -1,0 +1,35 @@
+# تحسينات مقترحة للكود
+
+# 1. إضافة تحليل الحساسية
+def sensitivity_analysis(problem, res, n_samples=100):
+    """تحليل حساسية المعاملات الرئيسية"""
+    sensitivities = {}
+    # تحليل تأثير تغيير K_heckel على النتائج
+    # تحليل تأثير تغيير معامل التكلفة
+    
+# 2. إضافة مؤشرات أداء التحسين
+def calculate_metrics(res):
+    """حساب مؤشرات جبهة باريتو"""
+    from pymoo.indicators.hv import Hypervolume
+    from pymoo.indicators.gd import GD
+    
+    hv = Hypervolume(ref_point=np.array([10, 30, 1000]))
+    hypervolume = hv.do(res.F)
+    
+# 3. تحسين معاملات الخوارزمية
+algorithm = NSGA2(
+    pop_size=100,
+    sampling=FloatRandomSampling(),
+    crossover=SBX(prob=0.9, eta=15),  # محسن للمتغيرات المستمرة
+    mutation=PolynomialMutation(prob=0.1, eta=20),
+    eliminate_duplicates=True
+)
+
+# 4. إضافة قيود إنتاجية
+def production_constraints(x):
+    P, B, S = x
+    # قيد طاقة الماكينة
+    g4 = P * S - 20000  # الطاقة القصوى
+    # قيد زمن الدورة
+    g5 = 60/S - 0.5  # زمن الدورة الأدنى
+    return [g4, g5]
