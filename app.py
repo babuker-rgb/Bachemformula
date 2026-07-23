@@ -1,8 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# Optimised for Cloud – Pre‑trained Model + Lightweight NSGA‑II
-# FIXED: session_state conflict for binder_grade
+# Optimised for Cloud – Fallback training if checkpoint missing
 # ================================================================
 
 import streamlit as st
@@ -62,10 +61,9 @@ NSGA_POP = 30
 NSGA_GENS = 20
 HIDDEN_SIZE = 512
 
-# Only used if you ever retrain locally
-N_SAMPLES = 25000
-ADAM_EPOCHS = 800
-PATIENCE = 100
+# Training parameters for fallback (small model)
+FALLBACK_SAMPLES = 3000
+FALLBACK_EPOCHS = 50
 
 # ================================================================
 # SESSION STATE – FIXED binder_grade handling
@@ -73,7 +71,7 @@ PATIENCE = 100
 if 'api' not in st.session_state:
     st.session_state.update({
         'api': 90.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
-        'moisture': 2.0, 'particle_size': 50.0, 'binder_grade_index': 0,  # <- index, not the string
+        'moisture': 2.0, 'particle_size': 50.0, 'binder_grade_index': 0,
         'pressure': 200.0, 'speed': 20.0, 'dwell_time': 25.0,
         'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
         'show_cost_solution': False, 'show_quality_solution': False,
@@ -196,9 +194,9 @@ class MultiTaskPINN(nn.Module):
             return output.cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (only for local checkpoint creation – not used on cloud)
+# DATA GENERATION (for training)
 # ================================================================
-def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
+def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
     api_raw = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
     binder_raw = rng.uniform(SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, n_samples)
@@ -245,7 +243,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations (same as before)
+    # Physics simulations
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -299,29 +297,72 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# PRE-TRAINED MODEL LOADER (NO RETRAINING ON CLOUD)
+# MODEL LOADER WITH FALLBACK TRAINING
 # ================================================================
 @st.cache_resource
-def load_pretrained_model():
-    """Load the pre-trained model from the checkpoint file in the repo."""
+def get_model():
     checkpoint_path = os.path.join(os.path.dirname(__file__), 'hybrid_unified_v29_30_R40.pt')
-    if not os.path.exists(checkpoint_path):
-        st.error(f"❌ Pre-trained model file not found at {checkpoint_path}")
-        st.info("Please ensure 'hybrid_unified_v29_30_R40.pt' is in the same folder as app.py.")
-        st.stop()
-    try:
-        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        model = MultiTaskPINN(input_dim=ckpt['input_dim'], hidden=HIDDEN_SIZE)
-        model.load_state_dict(ckpt['model_state'])
-        scaler = ckpt['scaler']
-        y_scaler = ckpt['y_scaler']
-        features = ckpt['features']
-        df = ckpt['df']
-        st.success("✅ Pre-trained model loaded successfully!")
-        return model, scaler, y_scaler, features, df
-    except Exception as e:
-        st.error(f"❌ Failed to load model: {e}")
-        st.stop()
+    if os.path.exists(checkpoint_path):
+        try:
+            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            model = MultiTaskPINN(input_dim=ckpt['input_dim'], hidden=HIDDEN_SIZE)
+            model.load_state_dict(ckpt['model_state'])
+            scaler = ckpt['scaler']
+            y_scaler = ckpt['y_scaler']
+            features = ckpt['features']
+            df = ckpt['df']
+            st.success("✅ Pre-trained model loaded successfully!")
+            return model, scaler, y_scaler, features, df
+        except Exception as e:
+            st.warning(f"⚠️ Failed to load pre-trained model: {e}. Training fallback model...")
+    else:
+        st.info("ℹ️ Pre-trained model not found. Training a small fallback model (this may take a few minutes)...")
+
+    # ---- Fallback training (small model) ----
+    N_SAMPLES = FALLBACK_SAMPLES
+    ADAM_EPOCHS = FALLBACK_EPOCHS
+    df, features = generate_pinn_data(N_SAMPLES)
+    X_raw = df[features].values
+    y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
+            'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_raw)
+    y_scaler = StandardScaler()
+    y_scaled = y_scaler.fit_transform(y)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y_scaled, test_size=0.2, random_state=42
+    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MultiTaskPINN(input_dim=X_raw.shape[1], hidden=HIDDEN_SIZE).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
+
+    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
+    y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
+    X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
+    y_test_t = torch.tensor(y_test, dtype=torch.float32).to(device)
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    for epoch in range(ADAM_EPOCHS):
+        model.train()
+        optimizer.zero_grad()
+        y_pred = model(X_train_t)
+        loss = nn.MSELoss()(y_pred, y_train_t)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step(loss.item())
+        progress_bar.progress((epoch+1)/ADAM_EPOCHS)
+        status_text.text(f"Training fallback model: epoch {epoch+1}/{ADAM_EPOCHS}")
+    progress_bar.empty()
+    status_text.empty()
+    st.success("✅ Fallback model trained successfully (small dataset). For better results, upload the full checkpoint file.")
+
+    # Store scalers and features in the session for later use
+    return model, scaler, y_scaler, features, df
 
 # ================================================================
 # NSGA-II OPTIMIZER (with dual penalties, reduced pop/gens)
@@ -894,13 +935,13 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Unified Framework v29.30-R40</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Optimised for Cloud – Pre‑trained Model + Lightweight NSGA‑II</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Optimised for Cloud – Fallback training if checkpoint missing</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ---- Load pre-trained model (no retraining) ----
-model, scaler, y_scaler, features, df = load_pretrained_model()
+# ---- Load model (with fallback) ----
+model, scaler, y_scaler, features, df = get_model()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if model is not None:
     device = next(model.parameters()).device
@@ -923,8 +964,8 @@ with st.sidebar:
             binder_grade = st.selectbox(
                 "Binder Grade",
                 BINDER_GRADES,
-                index=st.session_state.get('binder_grade_index', 0),  # default 0
-                key="binder_grade_select"   # unique key
+                index=st.session_state.get('binder_grade_index', 0),
+                key="binder_grade_select"
             )
             binder_grade_idx = BINDER_GRADES.index(binder_grade)
             st.session_state.binder_grade_index = binder_grade_idx
