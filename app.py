@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# COMPLETE: EFRF Penalty + Distinct 3-Solution Extraction + Full Model Support
+# IMPROVED: Diverse 3-Solution Extraction (even with fallback model)
 # ================================================================
 
 import streamlit as st
@@ -56,12 +56,10 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# ----- INCREASED NSGA-II PARAMETERS FOR MORE PARETO SOLUTIONS -----
 NSGA_POP = 60
 NSGA_GENS = 40
 HIDDEN_SIZE = 512
 
-# Fallback training parameters
 FALLBACK_SAMPLES = 3000
 FALLBACK_EPOCHS = 50
 
@@ -90,7 +88,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (unchanged)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     components = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
@@ -146,7 +144,7 @@ def calculate_quality_score(density, tensile, efrf, api=None):
     return overall
 
 # ================================================================
-# PINN MODEL
+# PINN MODEL (unchanged)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -198,7 +196,7 @@ class MultiTaskPINN(nn.Module):
             return output.cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (for fallback training)
+# DATA GENERATION (unchanged)
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -301,7 +299,7 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (with fallback training)
+# MODEL LOADER (unchanged)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -368,7 +366,7 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – ADDED EFRF PENALTY & INCREASED POP/GENS
+# NSGA-II OPTIMIZER – WITH EFRF PENALTY
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -634,7 +632,7 @@ class NSGAIIOptimizer:
         return pop, objectives, fronts
 
 # ================================================================
-# PREDICTION AND PLOTTING FUNCTIONS
+# PREDICTION AND PLOTTING FUNCTIONS (unchanged)
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
@@ -1009,7 +1007,6 @@ with st.sidebar:
             granule_fixed = False
             st.info(f"Granule size optimised by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
 
-    # ----- PENALTY SECTION WITH EFRF SLIDER -----
     st.markdown("### ⚙️ Penalty Adjustment")
     with st.container(border=True):
         penalty_api = st.slider("API Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
@@ -1104,7 +1101,7 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ---- ROBUST 3-SOLUTION EXTRACTION ----
+            # ---- IMPROVED DIVERSE SOLUTION EXTRACTION ----
             balanced_solution = None
             quality_solution = None
             cost_solution = None
@@ -1114,6 +1111,7 @@ with col_right:
                 n_front = len(front_indices)
                 
                 if n_front >= 1:
+                    # Build candidates with objectives and decision variables
                     candidates = []
                     for idx in front_indices:
                         ind = pop[idx]
@@ -1122,6 +1120,7 @@ with col_right:
                         _, t, _, _, _, _, _ = predict_pinn(model, scaler, y_scaler, ind)
                         pressure_val = ind[5]
                         
+                        # Scores
                         balanced_score = api_val - efrf_val * 20
                         quality_score = t
                         cost_score = api_val - 0.05 * pressure_val
@@ -1138,38 +1137,59 @@ with col_right:
                             'cost_score': cost_score
                         })
                     
+                    # Sort for each criterion
                     balanced_sorted = sorted(candidates, key=lambda x: x['balanced_score'], reverse=True)
                     quality_sorted = sorted(candidates, key=lambda x: x['quality_score'], reverse=True)
                     cost_sorted = sorted(candidates, key=lambda x: x['cost_score'], reverse=True)
                     
-                    used_indices = set()
+                    # ----- DIVERSITY ENFORCEMENT -----
+                    def is_similar(sol1, sol2, threshold=0.5):
+                        # Compare key formulation variables: API, binder, MCC
+                        if sol1 is None or sol2 is None:
+                            return False
+                        diff_api = abs(sol1[0] - sol2[0])
+                        diff_binder = abs(sol1[4] - sol2[4])
+                        diff_mcc = abs(sol1[1] - sol2[1])
+                        return (diff_api < threshold and diff_binder < threshold and diff_mcc < threshold)
                     
-                    # Balanced: pick best balanced
+                    selected_indices = []
+                    
+                    # 1. Balanced: pick the best balanced score
                     for c in balanced_sorted:
-                        if c['idx'] not in used_indices:
+                        if c['idx'] not in selected_indices:
                             balanced_solution = c['ind']
-                            used_indices.add(c['idx'])
-                            break
-                    # Quality: pick best quality (distinct)
-                    for c in quality_sorted:
-                        if c['idx'] not in used_indices:
-                            quality_solution = c['ind']
-                            used_indices.add(c['idx'])
-                            break
-                    # Cost: pick best cost (distinct)
-                    for c in cost_sorted:
-                        if c['idx'] not in used_indices:
-                            cost_solution = c['ind']
-                            used_indices.add(c['idx'])
+                            selected_indices.append(c['idx'])
                             break
                     
-                    # Fallback
-                    if balanced_solution is None and candidates:
-                        balanced_solution = balanced_sorted[0]['ind']
-                    if quality_solution is None and candidates:
-                        quality_solution = quality_sorted[0]['ind']
-                    if cost_solution is None and candidates:
-                        cost_solution = cost_sorted[0]['ind']
+                    # 2. Quality: pick best quality that is NOT similar to balanced
+                    for c in quality_sorted:
+                        if c['idx'] not in selected_indices:
+                            # Check similarity with balanced
+                            if not is_similar(balanced_solution, c['ind']):
+                                quality_solution = c['ind']
+                                selected_indices.append(c['idx'])
+                                break
+                    # If no distinct solution found, pick the next best (even if similar)
+                    if quality_solution is None:
+                        for c in quality_sorted:
+                            if c['idx'] not in selected_indices:
+                                quality_solution = c['ind']
+                                selected_indices.append(c['idx'])
+                                break
+                    
+                    # 3. Cost: pick best cost that is NOT similar to balanced OR quality
+                    for c in cost_sorted:
+                        if c['idx'] not in selected_indices:
+                            if not is_similar(balanced_solution, c['ind']) and not is_similar(quality_solution, c['ind']):
+                                cost_solution = c['ind']
+                                selected_indices.append(c['idx'])
+                                break
+                    if cost_solution is None:
+                        for c in cost_sorted:
+                            if c['idx'] not in selected_indices:
+                                cost_solution = c['ind']
+                                selected_indices.append(c['idx'])
+                                break
                     
                     # Store in session state
                     st.session_state.balanced_solution = balanced_solution
