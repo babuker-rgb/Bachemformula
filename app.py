@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# IMPROVED: Added EFRF Penalty + Larger NSGA-II Population/Generations
+# COMPLETE: EFRF Penalty + Distinct 3-Solution Extraction + Full Model Support
 # ================================================================
 
 import streamlit as st
@@ -57,8 +57,8 @@ BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
 # ----- INCREASED NSGA-II PARAMETERS FOR MORE PARETO SOLUTIONS -----
-NSGA_POP = 60          # was 40 – gives more diversity
-NSGA_GENS = 40         # was 25 – more generations for better convergence
+NSGA_POP = 60
+NSGA_GENS = 40
 HIDDEN_SIZE = 512
 
 # Fallback training parameters
@@ -384,7 +384,7 @@ class NSGAIIOptimizer:
         self.granule_fixed_val = granule_fixed_val
         self.penalty_api = penalty_api
         self.penalty_tensile = penalty_tensile
-        self.penalty_efrf = penalty_efrf   # NEW
+        self.penalty_efrf = penalty_efrf
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -468,7 +468,7 @@ class NSGAIIOptimizer:
         objectives[:, 0] += penalty_api_vec
         objectives[:, 1] += penalty_tensile_vec
 
-        # ----- NEW: EFRF PENALTY -----
+        # ----- EFRF PENALTY -----
         efrf_penalty_vec = self.penalty_efrf * np.maximum(0, efrf - 0.40) ** 2
         objectives[:, 2] += efrf_penalty_vec
 
@@ -1009,12 +1009,12 @@ with st.sidebar:
             granule_fixed = False
             st.info(f"Granule size optimised by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
 
-    # ----- UPDATED PENALTY SECTION WITH EFRF SLIDER -----
+    # ----- PENALTY SECTION WITH EFRF SLIDER -----
     st.markdown("### ⚙️ Penalty Adjustment")
     with st.container(border=True):
         penalty_api = st.slider("API Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
         penalty_tensile = st.slider("Tensile Penalty Strength", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
-        penalty_efrf = st.slider("EFRF Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")   # NEW
+        penalty_efrf = st.slider("EFRF Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
         st.caption("Higher API/Tensile penalties push for higher values. Higher EFRF penalty reduces elastic recovery.")
 
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
@@ -1095,7 +1095,7 @@ with col_right:
                     granule_fixed_val=granule if granule_fixed else 125.0,
                     penalty_api=penalty_api,
                     penalty_tensile=penalty_tensile,
-                    penalty_efrf=penalty_efrf   # NEW
+                    penalty_efrf=penalty_efrf
                 )
                 pop, objectives, fronts = nsga.run()
 
@@ -1104,7 +1104,7 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ---- Improved 3-solution extraction ----
+            # ---- ROBUST 3-SOLUTION EXTRACTION ----
             balanced_solution = None
             quality_solution = None
             cost_solution = None
@@ -1144,22 +1144,26 @@ with col_right:
                     
                     used_indices = set()
                     
+                    # Balanced: pick best balanced
                     for c in balanced_sorted:
                         if c['idx'] not in used_indices:
                             balanced_solution = c['ind']
                             used_indices.add(c['idx'])
                             break
+                    # Quality: pick best quality (distinct)
                     for c in quality_sorted:
                         if c['idx'] not in used_indices:
                             quality_solution = c['ind']
                             used_indices.add(c['idx'])
                             break
+                    # Cost: pick best cost (distinct)
                     for c in cost_sorted:
                         if c['idx'] not in used_indices:
                             cost_solution = c['ind']
                             used_indices.add(c['idx'])
                             break
                     
+                    # Fallback
                     if balanced_solution is None and candidates:
                         balanced_solution = balanced_sorted[0]['ind']
                     if quality_solution is None and candidates:
@@ -1167,6 +1171,7 @@ with col_right:
                     if cost_solution is None and candidates:
                         cost_solution = cost_sorted[0]['ind']
                     
+                    # Store in session state
                     st.session_state.balanced_solution = balanced_solution
                     st.session_state.quality_solution = quality_solution
                     st.session_state.cost_solution = cost_solution
