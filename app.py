@@ -1,8 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# Optimised for Cloud – Fallback training if checkpoint missing
-# FIXED: binder_grade and granule_mode session state conflicts
+# IMPROVED VERSION – Robust 3‑Solution Extraction + Session State Fixes
 # ================================================================
 
 import streamlit as st
@@ -57,9 +56,9 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# Lightweight NSGA‑II parameters (reduced CPU usage)
-NSGA_POP = 30
-NSGA_GENS = 20
+# Lightweight NSGA‑II parameters (reduced CPU usage – can be increased for better results)
+NSGA_POP = 40          # Increased for better diversity
+NSGA_GENS = 25         # Increased for better convergence
 HIDDEN_SIZE = 512
 
 # Training parameters for fallback (small model)
@@ -71,14 +70,16 @@ FALLBACK_EPOCHS = 50
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
-        'api': 90.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
-        'moisture': 2.0, 'particle_size': 50.0,
-        'binder_grade_index': 0,          # stores the integer index
-        'granule_mode_select': 'Fixed',    # stores the radio selection
+        'api': 89.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
+        'moisture': 1.0, 'particle_size': 50.0,
+        'binder_grade_index': 0,
+        'granule_mode_select': 'Variable',
         'pressure': 200.0, 'speed': 20.0, 'dwell_time': 25.0,
         'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
-        'show_cost_solution': False, 'show_quality_solution': False,
-        'show_comparison': False, 'show_sensitivity': False,
+        'show_cost_solution': True,
+        'show_quality_solution': True,
+        'show_comparison': False,
+        'show_sensitivity': False,
         'show_dissolution': False,
         'run_optimized': False, 'formulation': None,
         'feasible_df': None, 'tested_point': None, 'benchmark_df': None,
@@ -246,7 +247,7 @@ def generate_pinn_data(n_samples, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations (same as before)
+    # Physics simulations
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -367,7 +368,7 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER (with dual penalties, reduced pop/gens)
+# NSGA-II OPTIMIZER (with dual penalties)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -866,7 +867,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# MODEL COMPARISON (optional)
+# MODEL COMPARISON
 # ================================================================
 def run_model_comparison(model, scaler, y_scaler, features, df, device):
     if model is None:
@@ -962,7 +963,6 @@ with st.sidebar:
         with c2:
             moisture = st.slider("Moisture (%)", SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, st.session_state.moisture, 0.1, key="moisture")
             particle_size = st.slider("Particle Size (µm)", SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, st.session_state.particle_size, 1.0, key="particle_size")
-
             # ----- FIXED binder_grade selectbox -----
             binder_grade = st.selectbox(
                 "Binder Grade",
@@ -973,7 +973,6 @@ with st.sidebar:
             binder_grade_idx = BINDER_GRADES.index(binder_grade)
             st.session_state.binder_grade_index = binder_grade_idx
             # ---------------------------------------
-
         total = api + binder + pvpp + mgst + mcc + moisture
         if abs(total-100) < 0.5:
             st.success(f"✅ Total = {total:.2f}%")
@@ -995,7 +994,7 @@ with st.sidebar:
         granule_mode = st.radio(
             "Granule Size",
             options=["Fixed", "Variable"],
-            index=0 if st.session_state.get('granule_mode_select', 'Fixed') == 'Fixed' else 1,
+            index=0 if st.session_state.get('granule_mode_select', 'Variable') == 'Fixed' else 1,
             horizontal=True,
             key="granule_mode_select"
         )
@@ -1100,48 +1099,102 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            balanced_idx = None
-            quality_idx = None
-            cost_idx = None
+            # ================================================================
+            # IMPROVED 3-SOLUTION EXTRACTION – ROBUST EVEN WITH SMALL FRONTS
+            # ================================================================
+            balanced_solution = None
+            quality_solution = None
+            cost_solution = None
 
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
-                min_efrf = min(objectives[i, 2] for i in front_indices)
+                n_front = len(front_indices)
 
-                best_dist = np.inf
-                for idx in front_indices:
-                    api_val = -objectives[idx, 0]
-                    efrf_val = objectives[idx, 2]
-                    density_val = -objectives[idx, 0]  # proxy for density
-                    norm_api = (SLIDER_API_MAX - api_val) / (SLIDER_API_MAX - SLIDER_API_MIN)
-                    norm_efrf = (efrf_val - min_efrf) / (0.40 - min_efrf + 1e-10)
-                    norm_density = (D_MAX - density_val) / (D_MAX - D_MIN)
-                    dist = np.sqrt(norm_api**2 + norm_efrf**2 + norm_density**2)
-                    if dist < best_dist:
-                        best_dist = dist
-                        balanced_idx = idx
+                # ---- Balanced: closest to ideal point (max API, min EFRF) ----
+                if n_front >= 1:
+                    best_score = -np.inf
+                    best_idx = front_indices[0]
+                    for idx in front_indices:
+                        api_val = -objectives[idx, 0]
+                        efrf_val = objectives[idx, 2]
+                        # Heuristic: maximize API, minimize EFRF
+                        score = api_val - efrf_val * 20
+                        if score > best_score:
+                            best_score = score
+                            best_idx = idx
+                    balanced_idx = best_idx
+                    balanced_solution = pop[balanced_idx]
+                    st.session_state.balanced_solution = balanced_solution
 
-                best_tensile = -np.inf
-                for idx in front_indices:
-                    ind = pop[idx]
-                    _, t, _, _, _, _, _ = predict_pinn(model, scaler, y_scaler, ind)
-                    if t > best_tensile:
-                        best_tensile = t
-                        quality_idx = idx
+                # ---- Quality: highest tensile strength ----
+                if n_front >= 1:
+                    best_tensile = -np.inf
+                    best_idx = front_indices[0]
+                    for idx in front_indices:
+                        ind = pop[idx]
+                        _, t, _, _, _, _, _ = predict_pinn(model, scaler, y_scaler, ind)
+                        if t > best_tensile:
+                            best_tensile = t
+                            best_idx = idx
+                    quality_idx = best_idx
+                    quality_solution = pop[quality_idx]
+                    st.session_state.quality_solution = quality_solution
 
-                best_cost_score = -np.inf
-                for idx in front_indices:
-                    ind = pop[idx]
-                    api_val = ind[0]
-                    pressure_val = ind[5]
-                    score = api_val - 0.05 * pressure_val
-                    if score > best_cost_score:
-                        best_cost_score = score
-                        cost_idx = idx
+                # ---- Cost: max API, min pressure ----
+                if n_front >= 1:
+                    best_cost_score = -np.inf
+                    best_idx = front_indices[0]
+                    for idx in front_indices:
+                        ind = pop[idx]
+                        api_val = ind[0]
+                        pressure_val = ind[5]
+                        score = api_val - 0.05 * pressure_val
+                        if score > best_cost_score:
+                            best_cost_score = score
+                            best_idx = idx
+                    cost_idx = best_idx
+                    cost_solution = pop[cost_idx]
+                    st.session_state.cost_solution = cost_solution
 
-                st.session_state.balanced_solution = pop[balanced_idx] if balanced_idx is not None else None
-                st.session_state.quality_solution = pop[quality_idx] if quality_idx is not None else None
-                st.session_state.cost_solution = pop[cost_idx] if cost_idx is not None else None
+                # If we have at least 2 solutions, ensure they are distinct
+                if n_front >= 2:
+                    # If any two are the same, pick the next best from the front
+                    indices_used = set()
+                    for sol in [balanced_solution, quality_solution, cost_solution]:
+                        if sol is not None:
+                            # Find its index in pop
+                            for idx in front_indices:
+                                if np.allclose(pop[idx], sol):
+                                    indices_used.add(idx)
+                                    break
+                    if len(indices_used) < 3 and n_front >= 3:
+                        # Find additional distinct solutions
+                        remaining_indices = [idx for idx in front_indices if idx not in indices_used]
+                        for sol_type, current_sol in [('balanced', balanced_solution), ('quality', quality_solution), ('cost', cost_solution)]:
+                            if current_sol is None and remaining_indices:
+                                idx = remaining_indices.pop(0)
+                                if sol_type == 'balanced':
+                                    balanced_solution = pop[idx]
+                                    st.session_state.balanced_solution = balanced_solution
+                                elif sol_type == 'quality':
+                                    quality_solution = pop[idx]
+                                    st.session_state.quality_solution = quality_solution
+                                elif sol_type == 'cost':
+                                    cost_solution = pop[idx]
+                                    st.session_state.cost_solution = cost_solution
+
+            # Store predictions for all three solutions
+            if balanced_solution is not None:
+                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
+
+            if quality_solution is not None:
+                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, quality_solution)
+                st.session_state.quality_pred = (d, t, e, ef, dis, tau, beta)
+
+            if cost_solution is not None:
+                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, cost_solution)
+                st.session_state.cost_pred = (d, t, e, ef, dis, tau, beta)
 
             # Generate feasible region
             feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
@@ -1156,6 +1209,9 @@ with col_right:
         cost_solution = st.session_state.cost_solution
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
+        balanced_pred = st.session_state.balanced_pred
+        quality_pred = st.session_state.quality_pred
+        cost_pred = st.session_state.cost_pred
 
         st.markdown("### 📉 Pareto Front")
         if fronts is not None and len(fronts) > 0 and len(fronts[0]) > 0:
@@ -1172,71 +1228,71 @@ with col_right:
 
         solutions_rows = []
 
-        if balanced_solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
+        # ---- Balanced Solution ----
+        if balanced_solution is not None and balanced_pred is not None:
+            d, t, e, ef, dis, tau, beta = balanced_pred
             solutions_rows.append({
                 "Type": "⚖️ Balanced",
-                "API (%)": balanced_solution[0],
-                "MCC (%)": balanced_solution[1],
-                "PVPP (%)": balanced_solution[2],
-                "Mg-St (%)": balanced_solution[3],
-                "Binder (%)": balanced_solution[4],
-                "Moisture (%)": balanced_solution[9],
-                "Pressure (MPa)": balanced_solution[5],
-                "Speed (rpm)": balanced_solution[6],
-                "Granule (µm)": balanced_solution[7],
-                "Particle Size (µm)": balanced_solution[8],
+                "API (%)": round(balanced_solution[0], 1),
+                "MCC (%)": round(balanced_solution[1], 1),
+                "PVPP (%)": round(balanced_solution[2], 1),
+                "Mg-St (%)": round(balanced_solution[3], 2),
+                "Binder (%)": round(balanced_solution[4], 1),
+                "Moisture (%)": round(balanced_solution[9], 1),
+                "Pressure (MPa)": round(balanced_solution[5], 1),
+                "Speed (rpm)": round(balanced_solution[6], 1),
+                "Granule (µm)": round(balanced_solution[7], 0),
+                "Particle Size (µm)": round(balanced_solution[8], 0),
                 "Binder Grade": BINDER_GRADES[int(balanced_solution[10])],
-                "Density": d,
-                "Tensile (MPa)": t,
-                "EFRF": ef,
-                "Disintegration (min)": dis,
+                "Density": round(d, 3),
+                "Tensile (MPa)": round(t, 3),
+                "EFRF": round(ef, 4),
+                "Disintegration (min)": round(dis, 1),
             })
-            st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
 
-        if st.session_state.show_cost_solution and cost_solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, cost_solution)
+        # ---- Cost Solution (only if toggled on) ----
+        if st.session_state.show_cost_solution and cost_solution is not None and cost_pred is not None:
+            d, t, e, ef, dis, tau, beta = cost_pred
             solutions_rows.append({
                 "Type": "💰 Cost-Optimized",
-                "API (%)": cost_solution[0],
-                "MCC (%)": cost_solution[1],
-                "PVPP (%)": cost_solution[2],
-                "Mg-St (%)": cost_solution[3],
-                "Binder (%)": cost_solution[4],
-                "Moisture (%)": cost_solution[9],
-                "Pressure (MPa)": cost_solution[5],
-                "Speed (rpm)": cost_solution[6],
-                "Granule (µm)": cost_solution[7],
-                "Particle Size (µm)": cost_solution[8],
+                "API (%)": round(cost_solution[0], 1),
+                "MCC (%)": round(cost_solution[1], 1),
+                "PVPP (%)": round(cost_solution[2], 1),
+                "Mg-St (%)": round(cost_solution[3], 2),
+                "Binder (%)": round(cost_solution[4], 1),
+                "Moisture (%)": round(cost_solution[9], 1),
+                "Pressure (MPa)": round(cost_solution[5], 1),
+                "Speed (rpm)": round(cost_solution[6], 1),
+                "Granule (µm)": round(cost_solution[7], 0),
+                "Particle Size (µm)": round(cost_solution[8], 0),
                 "Binder Grade": BINDER_GRADES[int(cost_solution[10])],
-                "Density": d,
-                "Tensile (MPa)": t,
-                "EFRF": ef,
-                "Disintegration (min)": dis,
+                "Density": round(d, 3),
+                "Tensile (MPa)": round(t, 3),
+                "EFRF": round(ef, 4),
+                "Disintegration (min)": round(dis, 1),
             })
-            st.session_state.cost_pred = (d, t, e, ef, dis, tau, beta)
 
-        if st.session_state.show_quality_solution and quality_solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, quality_solution)
+        # ---- Quality Solution (only if toggled on) ----
+        if st.session_state.show_quality_solution and quality_solution is not None and quality_pred is not None:
+            d, t, e, ef, dis, tau, beta = quality_pred
             solutions_rows.append({
                 "Type": "🏆 Quality-Optimized",
-                "API (%)": quality_solution[0],
-                "MCC (%)": quality_solution[1],
-                "PVPP (%)": quality_solution[2],
-                "Mg-St (%)": quality_solution[3],
-                "Binder (%)": quality_solution[4],
-                "Moisture (%)": quality_solution[9],
-                "Pressure (MPa)": quality_solution[5],
-                "Speed (rpm)": quality_solution[6],
-                "Granule (µm)": quality_solution[7],
-                "Particle Size (µm)": quality_solution[8],
+                "API (%)": round(quality_solution[0], 1),
+                "MCC (%)": round(quality_solution[1], 1),
+                "PVPP (%)": round(quality_solution[2], 1),
+                "Mg-St (%)": round(quality_solution[3], 2),
+                "Binder (%)": round(quality_solution[4], 1),
+                "Moisture (%)": round(quality_solution[9], 1),
+                "Pressure (MPa)": round(quality_solution[5], 1),
+                "Speed (rpm)": round(quality_solution[6], 1),
+                "Granule (µm)": round(quality_solution[7], 0),
+                "Particle Size (µm)": round(quality_solution[8], 0),
                 "Binder Grade": BINDER_GRADES[int(quality_solution[10])],
-                "Density": d,
-                "Tensile (MPa)": t,
-                "EFRF": ef,
-                "Disintegration (min)": dis,
+                "Density": round(d, 3),
+                "Tensile (MPa)": round(t, 3),
+                "EFRF": round(ef, 4),
+                "Disintegration (min)": round(dis, 1),
             })
-            st.session_state.quality_pred = (d, t, e, ef, dis, tau, beta)
 
         if solutions_rows:
             df_solutions = pd.DataFrame(solutions_rows)
@@ -1266,8 +1322,8 @@ with col_right:
             st.caption("⚖️ Balanced = Trade-off (API, EFRF, Density) | 💰 Cost = Max API, Min Pressure | 🏆 Quality = Max Tensile Strength")
 
         st.markdown("---")
-        st.toggle("💰 Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", False), key="show_cost_solution")
-        st.toggle("🏆 Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", False), key="show_quality_solution")
+        st.toggle("💰 Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", True), key="show_cost_solution")
+        st.toggle("🏆 Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", True), key="show_quality_solution")
 
         st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", False), key="show_comparison")
         if st.session_state.show_comparison:
