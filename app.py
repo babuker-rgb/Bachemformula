@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# Enhanced Fallback (5000 samples, 100 epochs) + Distinct Solutions
+# FINAL: Force Distinct Solutions (Full 14‑D Decision Space)
 # ================================================================
 
 import streamlit as st
@@ -60,9 +60,8 @@ NSGA_POP = 60
 NSGA_GENS = 40
 HIDDEN_SIZE = 512
 
-# ---- ENHANCED FALLBACK PARAMETERS ----
-FALLBACK_SAMPLES = 5000   # increased from 3000
-FALLBACK_EPOCHS = 100     # increased from 50
+FALLBACK_SAMPLES = 5000
+FALLBACK_EPOCHS = 100
 
 # ================================================================
 # SESSION STATE
@@ -943,7 +942,7 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Unified Framework v29.30-R40</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Enhanced Fallback (5000 samples) + Force Distinct Solutions</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Force Distinct Solutions in Full 14‑D Space</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1103,7 +1102,7 @@ with col_right:
             st.session_state.run_optimized = True
 
             # ================================================================
-            # FORCE DISTINCT SOLUTIONS – EVEN IF OBJECTIVES ARE IDENTICAL
+            # FORCE DISTINCT SOLUTIONS IN FULL 14‑D DECISION SPACE
             # ================================================================
             balanced_solution = None
             quality_solution = None
@@ -1114,7 +1113,7 @@ with col_right:
                 n_front = len(front_indices)
                 
                 if n_front >= 1:
-                    # Build candidates with their decision variables
+                    # Build list of solutions with their objective values
                     candidates = []
                     for idx in front_indices:
                         ind = pop[idx]
@@ -1135,18 +1134,31 @@ with col_right:
                             'cost_score': api_val - 0.05 * pressure_val
                         })
                     
-                    # Function to calculate distance in decision space
-                    def decision_distance(sol1, sol2):
-                        if sol1 is None or sol2 is None:
-                            return 0
-                        diff = np.array([
-                            abs(sol1[0] - sol2[0]) / 20,
-                            abs(sol1[4] - sol2[4]) / 6,
-                            abs(sol1[1] - sol2[1]) / 8,
-                            abs(sol1[2] - sol2[2]) / 6,
-                            abs(sol1[3] - sol2[3]) / 1.2
-                        ])
-                        return np.sum(diff) / 5
+                    # Normalize decision variables for distance calculation
+                    # Define ranges for each of the 14 variables (order: api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time)
+                    ranges = np.array([
+                        SLIDER_API_MAX - SLIDER_API_MIN,
+                        SLIDER_MCC_MAX - SLIDER_MCC_MIN,
+                        SLIDER_PVPP_MAX - SLIDER_PVPP_MIN,
+                        SLIDER_MGST_MAX - SLIDER_MGST_MIN,
+                        SLIDER_BINDER_MAX - SLIDER_BINDER_MIN,
+                        SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN,
+                        SLIDER_SPEED_MAX - SLIDER_SPEED_MIN,
+                        SLIDER_GRANULE_MAX - SLIDER_GRANULE_MIN,
+                        SLIDER_PARTICLE_SIZE_MAX - SLIDER_PARTICLE_SIZE_MIN,
+                        SLIDER_MOISTURE_MAX - SLIDER_MOISTURE_MIN,
+                        len(BINDER_GRADES) - 1,  # binder_grade index (0-5)
+                        SLIDER_DWELL_TIME_MAX - SLIDER_DWELL_TIME_MIN,
+                        SLIDER_FRICTION_MAX - SLIDER_FRICTION_MIN,
+                        SLIDER_DECOMPRESSION_TIME_MAX - SLIDER_DECOMPRESSION_TIME_MIN
+                    ])
+                    # Avoid division by zero
+                    ranges[ranges == 0] = 1.0
+                    
+                    def full_distance(sol1, sol2):
+                        # sol1 and sol2 are 14‑dim arrays
+                        diff = (sol1 - sol2) / ranges
+                        return np.sqrt(np.sum(diff ** 2))
                     
                     # 1. Balanced: best balanced score
                     balanced_sorted = sorted(candidates, key=lambda x: x['balanced_score'], reverse=True)
@@ -1154,47 +1166,46 @@ with col_right:
                         balanced_candidate = balanced_sorted[0]
                         balanced_solution = balanced_candidate['ind']
                         balanced_idx = balanced_candidate['idx']
+                        balanced_vec = balanced_solution.copy()
                         
-                        # 2. Quality: best quality score, different from balanced
-                        quality_sorted = sorted(candidates, key=lambda x: x['quality_score'], reverse=True)
+                        # 2. Quality: maximize distance from balanced (or maximize tensile if tie)
                         quality_candidate = None
-                        for c in quality_sorted:
+                        max_dist = -1
+                        for c in candidates:
                             if c['idx'] != balanced_idx:
-                                if decision_distance(balanced_solution, c['ind']) > 0.15:
+                                dist = full_distance(balanced_vec, c['ind'])
+                                # If distances are equal, pick higher tensile
+                                if dist > max_dist or (dist == max_dist and c['tensile'] > (quality_candidate['tensile'] if quality_candidate else -1)):
+                                    max_dist = dist
                                     quality_candidate = c
-                                    break
                         if quality_candidate is None:
-                            for c in quality_sorted:
-                                if c['idx'] != balanced_idx:
-                                    quality_candidate = c
-                                    break
-                        if quality_candidate is not None:
-                            quality_solution = quality_candidate['ind']
-                            quality_idx = quality_candidate['idx']
-                        else:
-                            quality_solution = balanced_solution
-                            quality_idx = balanced_idx
+                            # fallback: if only one solution, use it
+                            quality_candidate = balanced_candidate
+                        quality_solution = quality_candidate['ind']
+                        quality_idx = quality_candidate['idx']
+                        quality_vec = quality_solution.copy()
                         
-                        # 3. Cost: best cost, different from both
-                        cost_sorted = sorted(candidates, key=lambda x: x['cost_score'], reverse=True)
+                        # 3. Cost: maximize minimum distance from both balanced and quality
                         cost_candidate = None
-                        used_indices = {balanced_idx, quality_idx}
-                        for c in cost_sorted:
-                            if c['idx'] not in used_indices:
-                                d1 = decision_distance(balanced_solution, c['ind'])
-                                d2 = decision_distance(quality_solution, c['ind'])
-                                if d1 > 0.15 and d2 > 0.15:
+                        max_min_dist = -1
+                        for c in candidates:
+                            if c['idx'] != balanced_idx and c['idx'] != quality_idx:
+                                d1 = full_distance(balanced_vec, c['ind'])
+                                d2 = full_distance(quality_vec, c['ind'])
+                                min_dist = min(d1, d2)
+                                # If min_dist is larger, or tie and cost_score higher
+                                if min_dist > max_min_dist or (min_dist == max_min_dist and c['cost_score'] > (cost_candidate['cost_score'] if cost_candidate else -1)):
+                                    max_min_dist = min_dist
+                                    cost_candidate = c
+                        if cost_candidate is None:
+                            # fallback: pick any remaining
+                            for c in candidates:
+                                if c['idx'] != balanced_idx and c['idx'] != quality_idx:
                                     cost_candidate = c
                                     break
                         if cost_candidate is None:
-                            for c in cost_sorted:
-                                if c['idx'] not in used_indices:
-                                    cost_candidate = c
-                                    break
-                        if cost_candidate is not None:
-                            cost_solution = cost_candidate['ind']
-                        else:
-                            cost_solution = balanced_solution
+                            cost_candidate = balanced_candidate  # ultimate fallback
+                        cost_solution = cost_candidate['ind']
                     
                     # Store in session state
                     st.session_state.balanced_solution = balanced_solution
