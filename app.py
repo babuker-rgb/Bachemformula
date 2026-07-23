@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# COMPLETE FIXED VERSION – Full NSGA‑II + 3‑Solution Extraction
+# IMPROVED: Added EFRF Penalty + Larger NSGA-II Population/Generations
 # ================================================================
 
 import streamlit as st
@@ -56,9 +56,9 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# NSGA‑II parameters (adjustable)
-NSGA_POP = 40
-NSGA_GENS = 25
+# ----- INCREASED NSGA-II PARAMETERS FOR MORE PARETO SOLUTIONS -----
+NSGA_POP = 60          # was 40 – gives more diversity
+NSGA_GENS = 40         # was 25 – more generations for better convergence
 HIDDEN_SIZE = 512
 
 # Fallback training parameters
@@ -368,12 +368,12 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# COMPLETE NSGA-II OPTIMIZER (FULL IMPLEMENTATION)
+# NSGA-II OPTIMIZER – ADDED EFRF PENALTY & INCREASED POP/GENS
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
                  granule_fixed=True, granule_fixed_val=125.0,
-                 penalty_api=0.08, penalty_tensile=0.05):
+                 penalty_api=0.08, penalty_tensile=0.05, penalty_efrf=0.08):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -384,6 +384,7 @@ class NSGAIIOptimizer:
         self.granule_fixed_val = granule_fixed_val
         self.penalty_api = penalty_api
         self.penalty_tensile = penalty_tensile
+        self.penalty_efrf = penalty_efrf   # NEW
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -467,6 +468,11 @@ class NSGAIIOptimizer:
         objectives[:, 0] += penalty_api_vec
         objectives[:, 1] += penalty_tensile_vec
 
+        # ----- NEW: EFRF PENALTY -----
+        efrf_penalty_vec = self.penalty_efrf * np.maximum(0, efrf - 0.40) ** 2
+        objectives[:, 2] += efrf_penalty_vec
+
+        # Additional physical constraints penalties
         penalty = np.zeros(n)
         penalty += np.where(tensile < TENSILE_MIN, (TENSILE_MIN - tensile)**2, 0.0)
         penalty += np.where(efrf >= 0.40, (efrf - 0.40)**2, 0.0)
@@ -1003,11 +1009,13 @@ with st.sidebar:
             granule_fixed = False
             st.info(f"Granule size optimised by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
 
+    # ----- UPDATED PENALTY SECTION WITH EFRF SLIDER -----
     st.markdown("### ⚙️ Penalty Adjustment")
     with st.container(border=True):
         penalty_api = st.slider("API Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
         penalty_tensile = st.slider("Tensile Penalty Strength", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
-        st.caption("Higher values promote higher API% and Tensile simultaneously.")
+        penalty_efrf = st.slider("EFRF Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")   # NEW
+        st.caption("Higher API/Tensile penalties push for higher values. Higher EFRF penalty reduces elastic recovery.")
 
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -1086,7 +1094,8 @@ with col_right:
                     granule_fixed=granule_fixed,
                     granule_fixed_val=granule if granule_fixed else 125.0,
                     penalty_api=penalty_api,
-                    penalty_tensile=penalty_tensile
+                    penalty_tensile=penalty_tensile,
+                    penalty_efrf=penalty_efrf   # NEW
                 )
                 pop, objectives, fronts = nsga.run()
 
@@ -1095,9 +1104,7 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ================================================================
-            # IMPROVED 3-SOLUTION EXTRACTION – FORCES DISTINCT SOLUTIONS
-            # ================================================================
+            # ---- Improved 3-solution extraction ----
             balanced_solution = None
             quality_solution = None
             cost_solution = None
