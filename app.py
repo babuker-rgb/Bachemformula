@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# IMPROVED: Diverse 3-Solution Extraction (even with fallback model)
+# FINAL: Diversity-Enforced 3-Solution Extraction
 # ================================================================
 
 import streamlit as st
@@ -88,7 +88,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# HELPER FUNCTIONS (same as before)
+# HELPER FUNCTIONS
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     components = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
@@ -144,7 +144,7 @@ def calculate_quality_score(density, tensile, efrf, api=None):
     return overall
 
 # ================================================================
-# PINN MODEL (unchanged)
+# PINN MODEL
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -196,7 +196,7 @@ class MultiTaskPINN(nn.Module):
             return output.cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (unchanged)
+# DATA GENERATION
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -299,7 +299,7 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (unchanged)
+# MODEL LOADER (with fallback training)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -366,12 +366,13 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – WITH EFRF PENALTY
+# NSGA-II OPTIMIZER – WITH DIVERSITY PENALTY
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
                  granule_fixed=True, granule_fixed_val=125.0,
-                 penalty_api=0.08, penalty_tensile=0.05, penalty_efrf=0.08):
+                 penalty_api=0.08, penalty_tensile=0.05, penalty_efrf=0.08,
+                 diversity_weight=0.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -383,6 +384,7 @@ class NSGAIIOptimizer:
         self.penalty_api = penalty_api
         self.penalty_tensile = penalty_tensile
         self.penalty_efrf = penalty_efrf
+        self.diversity_weight = diversity_weight  # NEW
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -469,6 +471,13 @@ class NSGAIIOptimizer:
         # EFRF penalty
         efrf_penalty_vec = self.penalty_efrf * np.maximum(0, efrf - 0.40) ** 2
         objectives[:, 2] += efrf_penalty_vec
+
+        # ----- DIVERSITY PENALTY (NEW) -----
+        # Encourages exploration of different binder and MCC levels
+        binder_norm = (repaired[:, 4] - SLIDER_BINDER_MIN) / (SLIDER_BINDER_MAX - SLIDER_BINDER_MIN)
+        mcc_norm = (repaired[:, 1] - SLIDER_MCC_MIN) / (SLIDER_MCC_MAX - SLIDER_MCC_MIN)
+        diversity_penalty = self.diversity_weight * (0.5 - binder_norm) ** 2 + self.diversity_weight * (0.5 - mcc_norm) ** 2
+        objectives[:, 0] += diversity_penalty
 
         # Physical constraints penalties
         penalty = np.zeros(n)
@@ -1007,12 +1016,14 @@ with st.sidebar:
             granule_fixed = False
             st.info(f"Granule size optimised by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
 
+    # ----- PENALTY ADJUSTMENT WITH DIVERSITY SLIDER -----
     st.markdown("### ⚙️ Penalty Adjustment")
     with st.container(border=True):
-        penalty_api = st.slider("API Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
-        penalty_tensile = st.slider("Tensile Penalty Strength", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
-        penalty_efrf = st.slider("EFRF Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
-        st.caption("Higher API/Tensile penalties push for higher values. Higher EFRF penalty reduces elastic recovery.")
+        penalty_api = st.slider("API Penalty Strength", 0.0, 0.2, 0.0, 0.005, key="penalty_api")
+        penalty_tensile = st.slider("Tensile Penalty Strength", 0.0, 0.2, 0.0, 0.005, key="penalty_tensile")
+        penalty_efrf = st.slider("EFRF Penalty Strength", 0.0, 0.2, 0.0, 0.005, key="penalty_efrf")
+        diversity_weight = st.slider("Diversity Penalty (Explore different formulations)", 0.0, 1.0, 0.0, 0.05, key="diversity_weight")
+        st.caption("Higher Diversity Penalty encourages exploring different binder/MCC levels, producing more diverse solutions.")
 
     predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -1092,7 +1103,8 @@ with col_right:
                     granule_fixed_val=granule if granule_fixed else 125.0,
                     penalty_api=penalty_api,
                     penalty_tensile=penalty_tensile,
-                    penalty_efrf=penalty_efrf
+                    penalty_efrf=penalty_efrf,
+                    diversity_weight=diversity_weight  # NEW
                 )
                 pop, objectives, fronts = nsga.run()
 
@@ -1101,9 +1113,7 @@ with col_right:
             st.session_state.nsga_fronts = fronts
             st.session_state.run_optimized = True
 
-            # ================================================================
-            # IMPROVED DIVERSE SOLUTION EXTRACTION (FORCES DISTINCT SOLUTIONS)
-            # ================================================================
+            # ---- IMPROVED DIVERSE SOLUTION EXTRACTION ----
             balanced_solution = None
             quality_solution = None
             cost_solution = None
@@ -1112,7 +1122,6 @@ with col_right:
                 front_indices = fronts[0]
                 n_front = len(front_indices)
                 if n_front >= 1:
-                    # Build candidate list with their objective values and decision variables
                     candidates = []
                     for idx in front_indices:
                         ind = pop[idx]
@@ -1132,13 +1141,12 @@ with col_right:
                             'cost_score': api_val - 0.05 * pressure_val
                         })
 
-                    # ----- 1. Pick Balanced (closest to ideal: max API, min EFRF) -----
+                    # Balanced: best balanced score
                     balanced_sorted = sorted(candidates, key=lambda x: x['balanced_score'], reverse=True)
-                    best_balanced = balanced_sorted[0]
-                    balanced_solution = best_balanced['ind']
-                    balanced_idx = best_balanced['idx']
+                    balanced_solution = balanced_sorted[0]['ind']
+                    balanced_idx = balanced_sorted[0]['idx']
 
-                    # ----- 2. Pick Quality (max tensile) distinct from Balanced -----
+                    # Quality: best tensile, distinct from balanced
                     quality_sorted = sorted(candidates, key=lambda x: x['quality_score'], reverse=True)
                     quality_solution = None
                     for c in quality_sorted:
@@ -1147,11 +1155,10 @@ with col_right:
                             quality_idx = c['idx']
                             break
                     if quality_solution is None:
-                        # fallback: use second best
-                        quality_solution = quality_sorted[1]['ind'] if len(quality_sorted) > 1 else best_balanced['ind']
-                        quality_idx = quality_sorted[1]['idx'] if len(quality_sorted) > 1 else balanced_idx
+                        quality_solution = balanced_sorted[0]['ind']
+                        quality_idx = balanced_idx
 
-                    # ----- 3. Pick Cost (max API - 0.05*Pressure) distinct from the other two -----
+                    # Cost: best cost, distinct from balanced AND quality
                     cost_sorted = sorted(candidates, key=lambda x: x['cost_score'], reverse=True)
                     cost_solution = None
                     used_indices = {balanced_idx, quality_idx}
@@ -1160,13 +1167,7 @@ with col_right:
                             cost_solution = c['ind']
                             break
                     if cost_solution is None:
-                        # fallback: pick the first not used
-                        for c in cost_sorted:
-                            if c['idx'] not in used_indices:
-                                cost_solution = c['ind']
-                                break
-                        if cost_solution is None:
-                            cost_solution = best_balanced['ind']
+                        cost_solution = balanced_sorted[0]['ind']
 
                     st.session_state.balanced_solution = balanced_solution
                     st.session_state.quality_solution = quality_solution
