@@ -56,12 +56,12 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# Lightweight NSGA‑II parameters (reduced CPU usage)
-NSGA_POP = 30
-NSGA_GENS = 20
-HIDDEN_SIZE = 512
+# ---- Reduzierte NSGA‑II Parameter für geringeren CPU-Verbrauch ----
+NSGA_POP = 30        # ursprünglich 80
+NSGA_GENS = 20       # ursprünglich 50
+HIDDEN_SIZE = 512    # bleibt wie im Unified Framework
 
-# Only used if you ever retrain locally
+# Diese werden nur benötigt, falls lokal neu trainiert wird
 N_SAMPLES = 25000
 ADAM_EPOCHS = 800
 PATIENCE = 100
@@ -195,7 +195,7 @@ class MultiTaskPINN(nn.Module):
             return output.cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (only for local checkpoint creation – not used on cloud)
+# DATA GENERATION (only used if model needs to be re-trained locally)
 # ================================================================
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
