@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# FORCE DISTINCT SOLUTIONS – Even with fallback model
+# Enhanced Fallback (5000 samples, 100 epochs) + Distinct Solutions
 # ================================================================
 
 import streamlit as st
@@ -60,8 +60,9 @@ NSGA_POP = 60
 NSGA_GENS = 40
 HIDDEN_SIZE = 512
 
-FALLBACK_SAMPLES = 3000
-FALLBACK_EPOCHS = 50
+# ---- ENHANCED FALLBACK PARAMETERS ----
+FALLBACK_SAMPLES = 5000   # increased from 3000
+FALLBACK_EPOCHS = 100     # increased from 50
 
 # ================================================================
 # SESSION STATE
@@ -245,7 +246,7 @@ def generate_pinn_data(n_samples, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations
+    # Physics simulations (full implementation)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -299,7 +300,7 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (with fallback training)
+# MODEL LOADER (with fallback training – enhanced)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -320,7 +321,7 @@ def get_model():
     else:
         st.info("ℹ️ Pre-trained model not found. Training a small fallback model (this may take a few minutes)...")
 
-    # Fallback training (runs locally, no Colab needed)
+    # ---- Fallback training (enhanced) ----
     N_SAMPLES = FALLBACK_SAMPLES
     ADAM_EPOCHS = FALLBACK_EPOCHS
     df, features = generate_pinn_data(N_SAMPLES)
@@ -937,12 +938,12 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
     return pd.DataFrame(rows), chart_data
 
 # ================================================================
-# MAIN APPLICATION – WITH FORCE DISTINCT SOLUTIONS
+# MAIN APPLICATION
 # ================================================================
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Unified Framework v29.30-R40</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Force Distinct Solutions – Even with Fallback Model</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Enhanced Fallback (5000 samples) + Force Distinct Solutions</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
