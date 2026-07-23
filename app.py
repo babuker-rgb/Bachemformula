@@ -1,7 +1,8 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# Merges best features from AI_HYB, Co-HYBAI, and PLEX_HYBAI
+# Optimised for Cloud – Pre‑trained Model + Lightweight NSGA‑II
+# FIXED: session_state conflict for binder_grade
 # ================================================================
 
 import streamlit as st
@@ -56,20 +57,23 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
+# Lightweight NSGA‑II parameters (reduced CPU usage)
+NSGA_POP = 30
+NSGA_GENS = 20
+HIDDEN_SIZE = 512
+
+# Only used if you ever retrain locally
 N_SAMPLES = 25000
 ADAM_EPOCHS = 800
 PATIENCE = 100
-NSGA_POP = 80
-NSGA_GENS = 50
-HIDDEN_SIZE = 512
 
 # ================================================================
-# SESSION STATE INITIALIZATION
+# SESSION STATE – FIXED binder_grade handling
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
         'api': 90.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
-        'moisture': 2.0, 'particle_size': 50.0, 'binder_grade': 0,
+        'moisture': 2.0, 'particle_size': 50.0, 'binder_grade_index': 0,  # <- index, not the string
         'pressure': 200.0, 'speed': 20.0, 'dwell_time': 25.0,
         'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
         'show_cost_solution': False, 'show_quality_solution': False,
@@ -87,7 +91,6 @@ if 'api' not in st.session_state:
 # HELPER FUNCTIONS
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
-    """Normalize formulation components to sum to 100%"""
     components = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
     total = np.sum(components)
     if total <= 0:
@@ -105,7 +108,6 @@ def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     return api*scale, binder*scale, pvpp*scale, mgst*scale, mcc*scale, moisture*scale
 
 def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
-    """Calculate dwell time from tableting speed"""
     speed_rpm = np.asarray(speed_rpm)
     result = np.full_like(speed_rpm, 50.0, dtype=float)
     mask = speed_rpm > 0
@@ -113,7 +115,6 @@ def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
     return np.clip(result, 5.0, 80.0)
 
 def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
-    """Predict disintegration time from formulation and tensile"""
     base_time = 2.0 + 0.5 * tensile
     pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
     api_effect = 0.1 * (api_n - 80)
@@ -123,7 +124,6 @@ def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
     return np.clip(time, 1.0, 30.0)
 
 def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
-    """Predict dissolution parameters (tau, beta)"""
     tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
     tau = np.clip(tau, 2.0, 20.0)
     beta = 1.0 + 0.01 * (particle_size - 50) / 50
@@ -131,7 +131,6 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return tau, beta
 
 def calculate_quality_score(density, tensile, efrf, api=None):
-    """Calculate weighted quality score with optional API inclusion"""
     density_score = min(100, (density / 0.95) * 100)
     tensile_score = min(100, (tensile / 8.5) * 100)
     efrf_score = max(0, (1 - efrf) * 100)
@@ -176,7 +175,7 @@ class MultiTaskPINN(nn.Module):
         self.res2 = ResidualBlock(hidden, dropout=0.05)
         self.res3 = ResidualBlock(hidden, dropout=0.05)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh(), nn.Dropout(0.05))
-        self.output = nn.Linear(hidden//2, 6)  # Density, Tensile, ER, Disintegration, Dissolution_tau, Dissolution_beta
+        self.output = nn.Linear(hidden//2, 6)
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -197,7 +196,7 @@ class MultiTaskPINN(nn.Module):
             return output.cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (19 features)
+# DATA GENERATION (only for local checkpoint creation – not used on cloud)
 # ================================================================
 def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -220,7 +219,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw, moisture_raw
     )
 
-    # Base features (14)
     X_base = np.column_stack([
         api_n, mcc_n, pvpp_n, mgst_n, binder_n,
         pressure_raw, speed_raw, granule_raw,
@@ -228,7 +226,6 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         dwell_time_raw, friction_raw, decompression_time_raw
     ])
 
-    # Interaction features (5)
     api_binder = api_n * binder_n
     pressure_binder = pressure_raw * binder_n
     api_mcc = api_n * mcc_n
@@ -238,7 +235,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     X_enhanced = np.column_stack([
         X_base,
         api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
-    ])  # 19 features
+    ])
 
     feature_names = [
         'API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
@@ -248,7 +245,7 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics-based simulations
+    # Physics simulations (same as before)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -302,108 +299,32 @@ def generate_pinn_data(n_samples=N_SAMPLES, random_state=42):
     return df, feature_names
 
 # ================================================================
-# CACHED TRAINING
+# PRE-TRAINED MODEL LOADER (NO RETRAINING ON CLOUD)
 # ================================================================
-CACHE_DIR = tempfile.gettempdir()
-CHECKPOINT_PATH = os.path.join(CACHE_DIR, 'hybrid_unified_v29_30_R40.pt')
-
 @st.cache_resource
-def load_or_train():
-    if os.path.exists(CHECKPOINT_PATH):
-        try:
-            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
-            model = MultiTaskPINN(input_dim=ckpt['input_dim'], hidden=HIDDEN_SIZE)
-            model.load_state_dict(ckpt['model_state'])
-            scaler = ckpt['scaler']
-            y_scaler = ckpt['y_scaler']
-            features = ckpt['features']
-            df = ckpt['df']
-            st.success(" Model loaded from cache successfully!")
-            return model, scaler, y_scaler, features, df
-        except Exception as e:
-            st.warning(f"Cache load failed: {e}. Retraining...")
-            if os.path.exists(CHECKPOINT_PATH):
-                os.remove(CHECKPOINT_PATH)
-
-    st.caption(" Training unified model (19 features, 25k samples)...")
-    df, features = generate_pinn_data(N_SAMPLES)
-    X_raw = df[features].values
-    n_features = X_raw.shape[1]
-    y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
-            'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
-    y_scaler = StandardScaler()
-    y_scaled = y_scaler.fit_transform(y)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y_scaled, test_size=0.2, random_state=42
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    st.caption(f" Using device: {device}")
-    model = MultiTaskPINN(n_features, hidden=HIDDEN_SIZE).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
-
-    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
-    X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-    y_test_t = torch.tensor(y_test, dtype=torch.float32).to(device)
-
-    best_r2_tensile = -np.inf
-    patience_counter = 0
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for epoch in range(ADAM_EPOCHS):
-        model.train()
-        optimizer.zero_grad()
-        y_pred = model(X_train_t)
-        loss = nn.MSELoss()(y_pred, y_train_t)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        scheduler.step(loss.item())
-
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(X_test_t).cpu().numpy()
-            val_true = y_test_t.cpu().numpy()
-            val_pred_actual = y_scaler.inverse_transform(val_pred)
-            val_true_actual = y_scaler.inverse_transform(val_true)
-            r2_tensile = r2_score(val_true_actual[:, 1], val_pred_actual[:, 1])
-
-        if epoch % 50 == 0:
-            status_text.text(f"Epoch {epoch+1}/{ADAM_EPOCHS} - Val R² Tensile: {r2_tensile:.4f}")
-
-        if r2_tensile > best_r2_tensile:
-            best_r2_tensile = r2_tensile
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= PATIENCE:
-                st.info(f"Early stopping at epoch {epoch+1} (no improvement for {PATIENCE} epochs)")
-                break
-        progress_bar.progress((epoch+1)/ADAM_EPOCHS)
-
-    progress_bar.empty()
-    st.success(f" Training complete! Best R² Tensile: {best_r2_tensile:.4f}")
-
-    checkpoint = {
-        'model_state': model.cpu().state_dict(),
-        'scaler': scaler,
-        'y_scaler': y_scaler,
-        'features': features,
-        'df': df,
-        'input_dim': n_features
-    }
-    torch.save(checkpoint, CHECKPOINT_PATH)
-    st.success(" Model cached successfully!")
-    return model, scaler, y_scaler, features, df
+def load_pretrained_model():
+    """Load the pre-trained model from the checkpoint file in the repo."""
+    checkpoint_path = os.path.join(os.path.dirname(__file__), 'hybrid_unified_v29_30_R40.pt')
+    if not os.path.exists(checkpoint_path):
+        st.error(f"❌ Pre-trained model file not found at {checkpoint_path}")
+        st.info("Please ensure 'hybrid_unified_v29_30_R40.pt' is in the same folder as app.py.")
+        st.stop()
+    try:
+        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        model = MultiTaskPINN(input_dim=ckpt['input_dim'], hidden=HIDDEN_SIZE)
+        model.load_state_dict(ckpt['model_state'])
+        scaler = ckpt['scaler']
+        y_scaler = ckpt['y_scaler']
+        features = ckpt['features']
+        df = ckpt['df']
+        st.success("✅ Pre-trained model loaded successfully!")
+        return model, scaler, y_scaler, features, df
+    except Exception as e:
+        st.error(f"❌ Failed to load model: {e}")
+        st.stop()
 
 # ================================================================
-# NSGA-II OPTIMIZER (with dual penalties from Co-HYBAI)
+# NSGA-II OPTIMIZER (with dual penalties, reduced pop/gens)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -488,14 +409,12 @@ class NSGAIIOptimizer:
         disintegration = np.maximum(pred[:, 3], 0.5)
         dissolution_tau = np.maximum(pred[:, 4], 1.0)
 
-        # Base objectives (to minimize): -density, -tensile, efrf
         objectives = np.column_stack([
             -density,
             -tensile,
             efrf
         ])
 
-        # Apply dual penalties (from Co-HYBAI)
         api = repaired[:, 0]
         api_norm = (api - 80) / 18
         tensile_norm = tensile / 8.5
@@ -504,7 +423,6 @@ class NSGAIIOptimizer:
         objectives[:, 0] += penalty_api_vec
         objectives[:, 1] += penalty_tensile_vec
 
-        # Additional physical constraints penalties
         penalty = np.zeros(n)
         penalty += np.where(tensile < TENSILE_MIN, (TENSILE_MIN - tensile)**2, 0.0)
         penalty += np.where(efrf >= 0.40, (efrf - 0.40)**2, 0.0)
@@ -800,7 +718,7 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=No
             x=[balanced_solution[0]],
             y=[balanced_solution[1]],
             mode='markers',
-            name=' Golden Solution (Balanced)',
+            name='⭐ Golden Solution (Balanced)',
             marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
             hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
@@ -869,7 +787,7 @@ def plot_sensitivity_bars(formulation, model, scaler, y_scaler):
         marker_color='steelblue',
         text=df_sens['Delta EFRF'].round(4),
         textposition='outside',
-        hovertemplate='%{y}<br>EFRF: %{x:.4f}<extra></extra>'
+        hovertemplate='%{y}<br>ΔEFRF: %{x:.4f}<extra></extra>'
     ))
     fig.add_vline(x=0.40, line_dash='dash', line_color='red',
                   annotation_text='EFRF threshold 0.40')
@@ -905,7 +823,7 @@ def plot_dissolution_profile(tau, beta, api_n, title="Predicted Dissolution Prof
     return fig
 
 # ================================================================
-# MODEL COMPARISON
+# MODEL COMPARISON (optional)
 # ================================================================
 def run_model_comparison(model, scaler, y_scaler, features, df, device):
     if model is None:
@@ -975,26 +893,21 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
 # ================================================================
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
-    <h2 style="color:#fff; margin:0;"> Hybrid AI · Unified Framework v29.30-R40</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Merging Best Features from AI_HYB, Co-HYBAI, and PLEX_HYBAI</p>
+    <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Unified Framework v29.30-R40</h2>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Optimised for Cloud – Pre‑trained Model + Lightweight NSGA‑II</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Load model
-try:
-    model, scaler, y_scaler, features, df = load_or_train()
-except Exception as e:
-    st.error(f" Training failed: {e}. Using dummy model.")
-    model = None
-
+# ---- Load pre-trained model (no retraining) ----
+model, scaler, y_scaler, features, df = load_pretrained_model()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 if model is not None:
     device = next(model.parameters()).device
 
-# Sidebar: Input Parameters
+# ---- Sidebar ----
 with st.sidebar:
-    st.markdown("###  Formulation & Material Parameters")
+    st.markdown("### 📊 Formulation & Material Parameters")
     with st.container(border=True):
         c1, c2 = st.columns(2)
         with c1:
@@ -1006,16 +919,23 @@ with st.sidebar:
         with c2:
             moisture = st.slider("Moisture (%)", SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, st.session_state.moisture, 0.1, key="moisture")
             particle_size = st.slider("Particle Size (µm)", SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, st.session_state.particle_size, 1.0, key="particle_size")
-            binder_grade = st.selectbox("Binder Grade", BINDER_GRADES, index=st.session_state.binder_grade, key="binder_grade")
+            # ----- FIXED binder_grade selectbox -----
+            binder_grade = st.selectbox(
+                "Binder Grade",
+                BINDER_GRADES,
+                index=st.session_state.get('binder_grade_index', 0),  # default 0
+                key="binder_grade_select"   # unique key
+            )
             binder_grade_idx = BINDER_GRADES.index(binder_grade)
-            st.session_state.binder_grade = binder_grade_idx
+            st.session_state.binder_grade_index = binder_grade_idx
+            # ---------------------------------------
         total = api + binder + pvpp + mgst + mcc + moisture
         if abs(total-100) < 0.5:
-            st.success(f" Total = {total:.2f}%")
+            st.success(f"✅ Total = {total:.2f}%")
         else:
-            st.warning(f" Total = {total:.2f}% (should be 100%)")
+            st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
 
-    st.markdown("###  Process Parameters")
+    st.markdown("### ⚙️ Process Parameters")
     with st.container(border=True):
         c1, c2 = st.columns(2)
         with c1:
@@ -1040,28 +960,28 @@ with st.sidebar:
         else:
             granule = st.session_state.get('granule', 125.0)
             granule_fixed = False
-            st.info(f"Granule size optimized by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
+            st.info(f"Granule size optimised by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
             st.session_state.granule_mode = 'Variable'
 
-    st.markdown("###  Penalty Adjustment (from Co-HYBAI)")
+    st.markdown("### ⚙️ Penalty Adjustment")
     with st.container(border=True):
         penalty_api = st.slider("API Penalty Strength", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
         penalty_tensile = st.slider("Tensile Penalty Strength", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
         st.caption("Higher values promote higher API% and Tensile simultaneously.")
 
-    predict_btn = st.button(" Predict & Optimize", use_container_width=True, type="primary")
+    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
 
-# Main Panel: Results
+# ---- Main Panel ----
 col_left, col_right = st.columns([1, 1.2], gap="medium")
 
 with col_right:
-    st.markdown("###  Results")
+    st.markdown("### 📈 Results")
 
     if predict_btn:
         if model is None:
-            st.error(" Model is not available. Please restart the app.")
+            st.error("❌ Model not loaded. Please check the checkpoint file.")
         elif abs(total-100) > 0.5:
-            st.warning(" Formulation must sum to 100% (within 0.5%)")
+            st.warning("⚠️ Formulation must sum to 100% (within 0.5%)")
         else:
             api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
                 api, binder, pvpp, mgst, mcc, moisture
@@ -1097,9 +1017,9 @@ with col_right:
 
             if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40,
                     mcc_n <= 8.0, disintegration <= 15.0]):
-                st.success(" All constraints satisfied")
+                st.success("✅ All constraints satisfied")
             else:
-                st.error(" Constraints violated")
+                st.error("❌ Constraints violated")
 
             # NSGA-II bounds
             bounds = np.array([
@@ -1119,7 +1039,7 @@ with col_right:
                 [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
             ])
 
-            with st.spinner(f"Running NSGA-II (pop={NSGA_POP}, gens={NSGA_GENS})..."):
+            with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS})..."):
                 nsga = NSGAIIOptimizer(
                     model, scaler, y_scaler, bounds,
                     pop=NSGA_POP, gens=NSGA_GENS,
@@ -1141,11 +1061,8 @@ with col_right:
 
             if len(fronts) > 0 and len(fronts[0]) > 0:
                 front_indices = fronts[0]
-                max_api = max(-objectives[i, 0] for i in front_indices)
                 min_efrf = min(objectives[i, 2] for i in front_indices)
-                max_density = max(-objectives[i, 0] for i in front_indices)
 
-                # Balanced: closest to ideal point (max API, min EFRF, max density)
                 best_dist = np.inf
                 for idx in front_indices:
                     api_val = -objectives[idx, 0]
@@ -1159,7 +1076,6 @@ with col_right:
                         best_dist = dist
                         balanced_idx = idx
 
-                # Quality: max tensile
                 best_tensile = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1168,7 +1084,6 @@ with col_right:
                         best_tensile = t
                         quality_idx = idx
 
-                # Cost: max API, min pressure
                 best_cost_score = -np.inf
                 for idx in front_indices:
                     ind = pop[idx]
@@ -1197,9 +1112,9 @@ with col_right:
         feasible_df = st.session_state.feasible_df
         tested_point = st.session_state.tested_point
 
-        st.markdown("###  Pareto Front")
+        st.markdown("### 📉 Pareto Front")
         if fronts is not None and len(fronts) > 0 and len(fronts[0]) > 0:
-            st.success(f" Pareto front: {len(fronts[0])} optimal solutions")
+            st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
             balanced_efrf = None
             if balanced_solution is not None:
                 _, _, _, ef, _, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
@@ -1208,14 +1123,14 @@ with col_right:
             if fig is not None:
                 st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("###  Optimal Solutions Comparison")
+        st.markdown("### 📊 Optimal Solutions Comparison")
 
         solutions_rows = []
 
         if balanced_solution is not None:
             d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
             solutions_rows.append({
-                "Type": " Balanced",
+                "Type": "⚖️ Balanced",
                 "API (%)": balanced_solution[0],
                 "MCC (%)": balanced_solution[1],
                 "PVPP (%)": balanced_solution[2],
@@ -1237,7 +1152,7 @@ with col_right:
         if st.session_state.show_cost_solution and cost_solution is not None:
             d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, cost_solution)
             solutions_rows.append({
-                "Type": " Cost-Optimized",
+                "Type": "💰 Cost-Optimized",
                 "API (%)": cost_solution[0],
                 "MCC (%)": cost_solution[1],
                 "PVPP (%)": cost_solution[2],
@@ -1259,7 +1174,7 @@ with col_right:
         if st.session_state.show_quality_solution and quality_solution is not None:
             d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, quality_solution)
             solutions_rows.append({
-                "Type": " Quality-Optimized",
+                "Type": "🏆 Quality-Optimized",
                 "API (%)": quality_solution[0],
                 "MCC (%)": quality_solution[1],
                 "PVPP (%)": quality_solution[2],
@@ -1303,15 +1218,15 @@ with col_right:
                     "Disintegration (min)": st.column_config.NumberColumn("Disintegration (min)", format="%.1f", width="small"),
                 }
             )
-            st.caption(" Balanced = Trade-off (API, EFRF, Density) |  Cost = Max API, Min Pressure |  Quality = Max Tensile Strength")
+            st.caption("⚖️ Balanced = Trade-off (API, EFRF, Density) | 💰 Cost = Max API, Min Pressure | 🏆 Quality = Max Tensile Strength")
 
         st.markdown("---")
-        st.toggle(" Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", False), key="show_cost_solution")
-        st.toggle(" Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", False), key="show_quality_solution")
+        st.toggle("💰 Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", False), key="show_cost_solution")
+        st.toggle("🏆 Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", False), key="show_quality_solution")
 
-        st.toggle(" Model Comparison", value=st.session_state.get("show_comparison", False), key="show_comparison")
+        st.toggle("📊 Model Comparison", value=st.session_state.get("show_comparison", False), key="show_comparison")
         if st.session_state.show_comparison:
-            st.markdown("###  Model Comparison")
+            st.markdown("### 📊 Model Comparison")
             bench_df, chart_data = run_model_comparison(model, scaler, y_scaler, features, df, device)
             st.session_state.benchmark_df = bench_df
             fig_bar = px.bar(pd.DataFrame(chart_data), x='Model', y='R²', color='Model',
@@ -1321,18 +1236,18 @@ with col_right:
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(bench_df, use_container_width=True)
 
-        st.toggle(" Sensitivity Analysis", value=st.session_state.get("show_sensitivity", False), key="show_sensitivity")
+        st.toggle("🔬 Sensitivity Analysis", value=st.session_state.get("show_sensitivity", False), key="show_sensitivity")
         if st.session_state.show_sensitivity:
-            st.markdown("###  Sensitivity Analysis")
+            st.markdown("### 🔬 Sensitivity Analysis")
             f = st.session_state.formulation
             if f is not None:
                 fig_bars = plot_sensitivity_bars(f, model, scaler, y_scaler)
                 if fig_bars:
                     st.plotly_chart(fig_bars, use_container_width=True)
 
-        st.toggle(" Dissolution Profile", value=st.session_state.get("show_dissolution", False), key="show_dissolution")
+        st.toggle("📊 Dissolution Profile", value=st.session_state.get("show_dissolution", False), key="show_dissolution")
         if st.session_state.show_dissolution:
-            st.markdown("###  Dissolution Profile")
+            st.markdown("### 📊 Dissolution Profile")
             f = st.session_state.formulation
             if f is not None:
                 tau = f.get('dissolution_tau', 10.0)
@@ -1342,13 +1257,13 @@ with col_right:
                 st.plotly_chart(fig, use_container_width=True)
 
         if st.session_state.experimental_data is not None:
-            st.markdown("###  Comparison with Experimental Data")
+            st.markdown("### 🧪 Comparison with Experimental Data")
             st.dataframe(st.session_state.experimental_data)
 
     else:
         if model is None:
-            st.warning(" Model not loaded. Please fix training issues and restart.")
+            st.warning("⚠️ Model not loaded. Please check the checkpoint file.")
         else:
-            st.info("Adjust parameters and click ' Predict & Optimize' to see results.")
+            st.info("👆 Adjust parameters and click 'Predict & Optimize' to see results.")
 
-st.caption(" Contact: babuker@protonmail.com |  Nile Valley University, Sudan")
+st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
