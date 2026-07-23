@@ -2,6 +2,7 @@
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
 # Optimised for Cloud – Fallback training if checkpoint missing
+# FIXED: binder_grade and granule_mode session state conflicts
 # ================================================================
 
 import streamlit as st
@@ -66,17 +67,19 @@ FALLBACK_SAMPLES = 3000
 FALLBACK_EPOCHS = 50
 
 # ================================================================
-# SESSION STATE – FIXED binder_grade handling
+# SESSION STATE – FIXED binder_grade and granule_mode
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
         'api': 90.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
-        'moisture': 2.0, 'particle_size': 50.0, 'binder_grade_index': 0,
+        'moisture': 2.0, 'particle_size': 50.0,
+        'binder_grade_index': 0,          # stores the integer index
+        'granule_mode_select': 'Fixed',    # stores the radio selection
         'pressure': 200.0, 'speed': 20.0, 'dwell_time': 25.0,
         'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
         'show_cost_solution': False, 'show_quality_solution': False,
         'show_comparison': False, 'show_sensitivity': False,
-        'show_dissolution': False, 'granule_mode': 'Fixed',
+        'show_dissolution': False,
         'run_optimized': False, 'formulation': None,
         'feasible_df': None, 'tested_point': None, 'benchmark_df': None,
         'nsga_pop': None, 'nsga_objectives': None, 'nsga_fronts': None,
@@ -243,7 +246,7 @@ def generate_pinn_data(n_samples, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations
+    # Physics simulations (same as before)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -361,7 +364,6 @@ def get_model():
     status_text.empty()
     st.success("✅ Fallback model trained successfully (small dataset). For better results, upload the full checkpoint file.")
 
-    # Store scalers and features in the session for later use
     return model, scaler, y_scaler, features, df
 
 # ================================================================
@@ -960,6 +962,7 @@ with st.sidebar:
         with c2:
             moisture = st.slider("Moisture (%)", SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, st.session_state.moisture, 0.1, key="moisture")
             particle_size = st.slider("Particle Size (µm)", SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, st.session_state.particle_size, 1.0, key="particle_size")
+
             # ----- FIXED binder_grade selectbox -----
             binder_grade = st.selectbox(
                 "Binder Grade",
@@ -970,6 +973,7 @@ with st.sidebar:
             binder_grade_idx = BINDER_GRADES.index(binder_grade)
             st.session_state.binder_grade_index = binder_grade_idx
             # ---------------------------------------
+
         total = api + binder + pvpp + mgst + mcc + moisture
         if abs(total-100) < 0.5:
             st.success(f"✅ Total = {total:.2f}%")
@@ -987,22 +991,22 @@ with st.sidebar:
             friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
             decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
+        # ----- FIXED granule_mode radio -----
         granule_mode = st.radio(
             "Granule Size",
             options=["Fixed", "Variable"],
-            index=0 if st.session_state.get('granule_mode', 'Fixed') == 'Fixed' else 1,
+            index=0 if st.session_state.get('granule_mode_select', 'Fixed') == 'Fixed' else 1,
             horizontal=True,
-            key="granule_mode"
+            key="granule_mode_select"
         )
         if granule_mode == "Fixed":
             granule = st.slider("Granule Size (µm)", SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, st.session_state.granule, 1.0, key="granule")
             granule_fixed = True
-            st.session_state.granule_mode = 'Fixed'
         else:
             granule = st.session_state.get('granule', 125.0)
             granule_fixed = False
             st.info(f"Granule size optimised by NSGA-II in range [{SLIDER_GRANULE_MIN:.0f}–{SLIDER_GRANULE_MAX:.0f}] µm")
-            st.session_state.granule_mode = 'Variable'
+        # ----------------------------------
 
     st.markdown("### ⚙️ Penalty Adjustment")
     with st.container(border=True):
