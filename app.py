@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# FINAL: Force Distinct Solutions in Full 14‑D Space
+# SIMPLIFIED – Enhanced Fallback (12000 samples, 200 epochs)
 # ================================================================
 
 import streamlit as st
@@ -60,8 +60,9 @@ NSGA_POP = 60
 NSGA_GENS = 40
 HIDDEN_SIZE = 512
 
-FALLBACK_SAMPLES = 5000
-FALLBACK_EPOCHS = 100
+# ---- ENHANCED FALLBACK (BIGGER MODEL) ----
+FALLBACK_SAMPLES = 12000   # increased from 5000
+FALLBACK_EPOCHS = 200      # increased from 100
 
 # ================================================================
 # SESSION STATE
@@ -942,7 +943,7 @@ def run_model_comparison(model, scaler, y_scaler, features, df, device):
 st.markdown("""
 <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
     <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Unified Framework v29.30-R40</h2>
-    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Force Distinct Solutions in Full 14‑D Space</p>
+    <p style="color:#64ffda; margin:0; font-size:0.9rem;">Enhanced Fallback (12000 samples) + Force Distinct Solutions</p>
     <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
 </div>
 """, unsafe_allow_html=True)
@@ -1113,7 +1114,6 @@ with col_right:
                 n_front = len(front_indices)
                 
                 if n_front >= 1:
-                    # Build list of solutions with their objective values
                     candidates = []
                     for idx in front_indices:
                         ind = pop[idx]
@@ -1134,8 +1134,7 @@ with col_right:
                             'cost_score': api_val - 0.05 * pressure_val
                         })
                     
-                    # Normalize decision variables for distance calculation
-                    # Define ranges for each of the 14 variables (order: api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time)
+                    # Normalize decision variables
                     ranges = np.array([
                         SLIDER_API_MAX - SLIDER_API_MIN,
                         SLIDER_MCC_MAX - SLIDER_MCC_MIN,
@@ -1147,20 +1146,18 @@ with col_right:
                         SLIDER_GRANULE_MAX - SLIDER_GRANULE_MIN,
                         SLIDER_PARTICLE_SIZE_MAX - SLIDER_PARTICLE_SIZE_MIN,
                         SLIDER_MOISTURE_MAX - SLIDER_MOISTURE_MIN,
-                        len(BINDER_GRADES) - 1,  # binder_grade index (0-5)
+                        len(BINDER_GRADES) - 1,
                         SLIDER_DWELL_TIME_MAX - SLIDER_DWELL_TIME_MIN,
                         SLIDER_FRICTION_MAX - SLIDER_FRICTION_MIN,
                         SLIDER_DECOMPRESSION_TIME_MAX - SLIDER_DECOMPRESSION_TIME_MIN
                     ])
-                    # Avoid division by zero
                     ranges[ranges == 0] = 1.0
                     
                     def full_distance(sol1, sol2):
-                        # sol1 and sol2 are 14‑dim arrays
                         diff = (sol1 - sol2) / ranges
                         return np.sqrt(np.sum(diff ** 2))
                     
-                    # 1. Balanced: best balanced score
+                    # Balanced: best balanced score
                     balanced_sorted = sorted(candidates, key=lambda x: x['balanced_score'], reverse=True)
                     if balanced_sorted:
                         balanced_candidate = balanced_sorted[0]
@@ -1168,24 +1165,22 @@ with col_right:
                         balanced_idx = balanced_candidate['idx']
                         balanced_vec = balanced_solution.copy()
                         
-                        # 2. Quality: maximize distance from balanced (or maximize tensile if tie)
+                        # Quality: maximize distance from balanced
                         quality_candidate = None
                         max_dist = -1
                         for c in candidates:
                             if c['idx'] != balanced_idx:
                                 dist = full_distance(balanced_vec, c['ind'])
-                                # If distances are equal, pick higher tensile
                                 if dist > max_dist or (dist == max_dist and c['tensile'] > (quality_candidate['tensile'] if quality_candidate else -1)):
                                     max_dist = dist
                                     quality_candidate = c
                         if quality_candidate is None:
-                            # fallback: if only one solution, use it
                             quality_candidate = balanced_candidate
                         quality_solution = quality_candidate['ind']
                         quality_idx = quality_candidate['idx']
                         quality_vec = quality_solution.copy()
                         
-                        # 3. Cost: maximize minimum distance from both balanced and quality
+                        # Cost: maximize min distance from balanced and quality
                         cost_candidate = None
                         max_min_dist = -1
                         for c in candidates:
@@ -1193,21 +1188,18 @@ with col_right:
                                 d1 = full_distance(balanced_vec, c['ind'])
                                 d2 = full_distance(quality_vec, c['ind'])
                                 min_dist = min(d1, d2)
-                                # If min_dist is larger, or tie and cost_score higher
                                 if min_dist > max_min_dist or (min_dist == max_min_dist and c['cost_score'] > (cost_candidate['cost_score'] if cost_candidate else -1)):
                                     max_min_dist = min_dist
                                     cost_candidate = c
                         if cost_candidate is None:
-                            # fallback: pick any remaining
                             for c in candidates:
                                 if c['idx'] != balanced_idx and c['idx'] != quality_idx:
                                     cost_candidate = c
                                     break
                         if cost_candidate is None:
-                            cost_candidate = balanced_candidate  # ultimate fallback
+                            cost_candidate = balanced_candidate
                         cost_solution = cost_candidate['ind']
                     
-                    # Store in session state
                     st.session_state.balanced_solution = balanced_solution
                     st.session_state.quality_solution = quality_solution
                     st.session_state.cost_solution = cost_solution
@@ -1350,7 +1342,7 @@ with col_right:
 
         st.toggle("📊 Dissolution Profile", value=st.session_state.get("show_dissolution", False), key="show_dissolution")
         if st.session_state.show_dissolution:
-            st.markdown("📊 Dissolution Profile")
+            st.markdown("### 📊 Dissolution Profile")
             f = st.session_state.formulation
             if f is not None:
                 tau = f.get('dissolution_tau', 10.0)
@@ -1360,7 +1352,7 @@ with col_right:
                 st.plotly_chart(fig, use_container_width=True)
 
         if st.session_state.experimental_data is not None:
-            st.markdown("🧪 Comparison with Experimental Data")
+            st.markdown("### 🧪 Comparison with Experimental Data")
             st.dataframe(st.session_state.experimental_data)
 
     else:
