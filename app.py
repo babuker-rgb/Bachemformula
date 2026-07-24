@@ -1,72 +1,136 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import plotly.graph_objects as go
+import warnings
+warnings.filterwarnings('ignore')
+
+st.set_page_config(page_title="Hybrid AI · Tablet Optimization", layout="wide")
+
 # ================================================================
-# توليد النموذج الكامل – نسخة مبسطة
+# CONSTANTS
 # ================================================================
-!pip install -q numpy pandas torch scikit-learn
+D_MIN, D_MAX = 0.72, 0.99
+TENSILE_MIN = 1.50
 
-import torch, numpy as np, pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score
+SLIDER_API_MIN, SLIDER_API_MAX = 80.0, 98.0
+SLIDER_MCC_MIN, SLIDER_MCC_MAX = 1.5, 8.0
+SLIDER_PVPP_MIN, SLIDER_PVPP_MAX = 1.0, 6.0
+SLIDER_MGST_MIN, SLIDER_MGST_MAX = 0.10, 1.2
+SLIDER_BINDER_MIN, SLIDER_BINDER_MAX = 1.4, 6.0
+SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX = 0.5, 5.0
+SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX = 10.0, 200.0
+SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX = 150.0, 250.0
+SLIDER_SPEED_MIN, SLIDER_SPEED_MAX = 15.0, 30.0
+SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX = 30.0, 250.0
+SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX = 5.0, 50.0
+SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX = 0.1, 0.5
+SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX = 10.0, 80.0
 
-# ---- هنا أنسخ دالة generate_pinn_data من app.py (طويلة لكن ضرورية) ----
-# بدلاً من نسخها هنا، الأسهل: ارفع ملف app.py إلى Colab (اسحبه إلى نافذة الملفات)
-# ثم استورد الدالة منه:
-import sys
-sys.path.append('/content')
-from app import generate_pinn_data, MultiTaskPINN, HIDDEN_SIZE
+BINDER_GRADES = ["MCC PH101", "MCC PH102", "MCC PH200", "MCC KG", "Lactose", "Dicalcium Phosphate"]
 
-# ---- التدريب ----
-print("🚀 جاري توليد النموذج الكامل...")
-df, features = generate_pinn_data(25000)
-X_raw = df[features].values
-y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
-        'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
+# ================================================================
+# SESSION STATE
+# ================================================================
+if 'api' not in st.session_state:
+    st.session_state.update({
+        'api': 89.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
+        'moisture': 1.0, 'particle_size': 50.0, 'binder_grade_index': 0,
+        'pressure': 200.0, 'speed': 20.0, 'dwell_time': 25.0,
+        'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
+        'run_optimized': False
+    })
 
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_raw)
-y_scaler = StandardScaler()
-y_scaled = y_scaler.fit_transform(y)
+# ================================================================
+# HELPER FUNCTIONS
+# ================================================================
+def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
+    comps = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
+    total = np.sum(comps)
+    if total <= 0:
+        total = 1.0
+    norm = (comps / total) * 100.0
+    api, binder, pvpp, mgst, mcc, moisture = norm
+    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
+    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
+    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
+    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
+    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
+    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
+    total2 = api + binder + pvpp + mgst + mcc + moisture
+    scale = 100.0 / total2
+    return api*scale, binder*scale, pvpp*scale, mgst*scale, mcc*scale, moisture*scale
 
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_scaled, test_size=0.2)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = MultiTaskPINN(input_dim=X_raw.shape[1], hidden=512).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
+# ================================================================
+# PINN MODEL (very simple dummy model for demonstration)
+# ================================================================
+class DummyModel:
+    def predict(self, X):
+        # Return constant predictions
+        return np.ones((X.shape[0], 3)) * 0.8
 
-X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
-y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
-X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-y_test_t = torch.tensor(y_test, dtype=torch.float32).to(device)
+model = DummyModel()
+scaler = None
+y_scaler = None
 
-best_r2 = -np.inf
-for epoch in range(800):
-    model.train()
-    optimizer.zero_grad()
-    y_pred = model(X_train_t)
-    loss = torch.nn.MSELoss()(y_pred, y_train_t)
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    optimizer.step()
-    scheduler.step(loss.item())
+# ================================================================
+# UI
+# ================================================================
+st.markdown("""
+<div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
+    <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Simplified Tablet Optimization</h2>
+    <p style="color:#aabbcc; margin:0; font-size:0.85rem;">Nile Valley University, Sudan</p>
+</div>
+""", unsafe_allow_html=True)
 
-    if epoch % 50 == 0:
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(X_test_t).cpu().numpy()
-            val_true = y_test_t.cpu().numpy()
-            val_pred_actual = y_scaler.inverse_transform(val_pred)
-            val_true_actual = y_scaler.inverse_transform(val_true)
-            r2_t = r2_score(val_true_actual[:, 1], val_pred_actual[:, 1])
-        print(f"الدورة {epoch}: R² = {r2_t:.4f}")
-        if r2_t > best_r2:
-            best_r2 = r2_t
-            checkpoint = {'model_state': model.cpu().state_dict(), 'scaler': scaler,
-                          'y_scaler': y_scaler, 'features': features, 'df': df,
-                          'input_dim': X_raw.shape[1]}
-            torch.save(checkpoint, 'hybrid_unified_v29_30_R40.pt')
-            print("✅ تم الحفظ")
+with st.sidebar:
+    st.markdown("### 📊 Formulation Parameters")
+    api = st.slider("API (%)", SLIDER_API_MIN, SLIDER_API_MAX, st.session_state.api, 0.1, key="api")
+    binder = st.slider("Binder (%)", SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, st.session_state.binder, 0.1, key="binder")
+    pvpp = st.slider("PVPP (%)", SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, st.session_state.pvpp, 0.1, key="pvpp")
+    mgst = st.slider("Mg-St (%)", SLIDER_MGST_MIN, SLIDER_MGST_MAX, st.session_state.mgst, 0.01, key="mgst")
+    mcc = st.slider("MCC (%)", SLIDER_MCC_MIN, SLIDER_MCC_MAX, st.session_state.mcc, 0.1, key="mcc")
+    moisture = st.slider("Moisture (%)", SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, st.session_state.moisture, 0.1, key="moisture")
+    binder_grade = st.selectbox("Binder Grade", BINDER_GRADES, index=st.session_state.binder_grade_index, key="binder_grade_select")
+    st.session_state.binder_grade_index = BINDER_GRADES.index(binder_grade)
+    particle_size = st.slider("Particle Size (µm)", SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, st.session_state.particle_size, 1.0, key="particle_size")
 
-# ---- تحميل الملف ----
-from google.colab import files
-files.download('hybrid_unified_v29_30_R40.pt')
-print("📥 جاري تحميل الملف...")
+    st.markdown("### ⚙️ Process Parameters")
+    pressure = st.slider("Pressure (MPa)", SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure")
+    speed = st.slider("Speed (rpm)", SLIDER_SPEED_MIN, SLIDER_SPEED_MAX, st.session_state.speed, 0.5, key="speed")
+    dwell_time = st.slider("Dwell Time (ms)", SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX, st.session_state.dwell_time, 0.5, key="dwell_time")
+    friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
+    decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
+    granule = st.slider("Granule Size (µm)", SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, st.session_state.granule, 1.0, key="granule")
+
+    predict_btn = st.button("🔬 Predict & Optimize", use_container_width=True, type="primary")
+
+if predict_btn:
+    total = api + binder + pvpp + mgst + mcc + moisture
+    if abs(total-100) > 0.5:
+        st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
+    else:
+        # Dummy predictions
+        density = 0.89
+        tensile = 5.1
+        efrf = 0.37
+        disintegration = 3.1
+
+        st.markdown("### 📈 Results")
+        st.markdown("**Constraint Status** (Density: 0.72–0.99, Tensile ≥ 1.50, EFRF < 0.40)")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Density", f"{density:.3f}", "[0.72, 0.99]")
+        col2.metric("Tensile", f"{tensile:.2f} MPa", "≥ 1.50")
+        col3.metric("EFRF", f"{efrf:.4f}", "< 0.40")
+
+        if all([D_MIN <= density <= D_MAX, tensile >= TENSILE_MIN, efrf < 0.40]):
+            st.success("✅ All constraints satisfied")
+        else:
+            st.error("❌ Constraints violated")
+
+        st.info("ℹ️ This is a simplified demo. For full multi‑objective optimization, use the complete framework with the pre‑trained model.")
+
+else:
+    st.info("👆 Adjust parameters and click 'Predict & Optimize' to see results.")
