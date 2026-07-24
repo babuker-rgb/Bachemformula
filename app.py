@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Unified Framework v29.30-R40
 # Nile Valley University · Sudan
-# FULL VERSION – Loads pre-trained model if available
+# FULL VERSION – FIXED (DummyModel defined globally)
 # ================================================================
 
 import streamlit as st
@@ -281,6 +281,13 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
+# GLOBAL DUMMY MODEL (to avoid NameError)
+# ================================================================
+class DummyModel:
+    def predict(self, X):
+        return np.ones((X.shape[0], 6)) * 0.8
+
+# ================================================================
 # MODEL LOADER (with fallback)
 # ================================================================
 @st.cache_resource
@@ -302,17 +309,16 @@ def get_model():
     else:
         st.info("ℹ️ Pre-trained model not found. Using fallback model (simplified).")
 
-    # Fallback: simple dummy model
-    class DummyModel:
-        def predict(self, X):
-            return np.ones((X.shape[0], 6)) * 0.8
+    # Fallback: dummy model
     model = DummyModel()
     scaler = None
     y_scaler = None
-    return model, scaler, y_scaler, [], None
+    features = []
+    df = None
+    return model, scaler, y_scaler, features, df
 
 # ================================================================
-# PREDICTION
+# PREDICTION (uses DummyModel defined globally)
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
@@ -345,6 +351,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         dissolution_beta = max(pred[5], 0.5)
         return density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta
     except Exception as e:
+        st.error(f"Prediction error: {e}")
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
 # ================================================================
