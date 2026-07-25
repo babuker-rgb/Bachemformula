@@ -187,19 +187,56 @@ class HybridTabletModel(nn.Module):
 # adds an actual physics-based synthetic dataset and an actual training
 # loop so the model has something real to learn from.
 N_SAMPLES = 8000
+BOUNDARY_FRACTION = 0.30  # share of samples deliberately drawn near composition-space corners
+
+def _sample_compositions(n_samples, rng, boundary_fraction=0.0):
+    """Sample the 6 raw (pre-mass-balance) composition values. With
+    boundary_fraction > 0, a share of rows have a RANDOM SUBSET of
+    components pinned near their own min or max bound before the uniform
+    draw, so mass-balance normalization actually produces corner-region
+    compositions (all-excipients-near-minimum, etc.) instead of relying on
+    every one of 6 independent uniform draws happening to land near a
+    bound simultaneously — which is so unlikely that plain uniform
+    sampling essentially never covers those corners (see BUGFIX note in
+    generate_synthetic_data)."""
+    bounds = [(API_MIN, API_MAX), (BINDER_MIN, BINDER_MAX), (PVPP_MIN, PVPP_MAX),
+              (MGST_MIN, MGST_MAX), (MCC_MIN, MCC_MAX), (MOISTURE_MIN, MOISTURE_MAX)]
+    cols = [rng.uniform(lo, hi, n_samples) for lo, hi in bounds]
+    comps = np.column_stack(cols)
+
+    n_boundary = int(n_samples * boundary_fraction)
+    if n_boundary > 0:
+        idx = rng.choice(n_samples, n_boundary, replace=False)
+        for row in idx:
+            n_pinned = rng.integers(2, 6)  # pin 2-5 of the 6 components near a bound
+            pinned_dims = rng.choice(6, n_pinned, replace=False)
+            for d in pinned_dims:
+                lo, hi = bounds[d]
+                span = hi - lo
+                near_lo = rng.random() < 0.5
+                jitter = rng.uniform(0, 0.08) * span
+                comps[row, d] = lo + jitter if near_lo else hi - jitter
+    return comps
 
 def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
     """Physics-motivated synthetic dataset for the 8 decision variables
     (API, binder, PVPP, MgSt, MCC, moisture, pressure, speed) -> 5 targets
     (density, tensile, EFRF, disintegration, dissolution)."""
     rng = np.random.default_rng(seed)
-    api = rng.uniform(API_MIN, API_MAX, n_samples)
-    binder = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
-    pvpp = rng.uniform(PVPP_MIN, PVPP_MAX, n_samples)
-    mgst = rng.uniform(MGST_MIN, MGST_MAX, n_samples)
-    mcc = rng.uniform(MCC_MIN, MCC_MAX, n_samples)
-    moisture = rng.uniform(MOISTURE_MIN, MOISTURE_MAX, n_samples)
-    comps = np.column_stack([api, binder, pvpp, mgst, mcc, moisture])
+
+    # BUGFIX: independently drawing each of the 6 composition values
+    # uniformly, then rescaling to sum to 100%, essentially never produces
+    # "corner" formulations where several excipients are simultaneously
+    # near their own minimum — verified empirically: across 8000 samples
+    # of the old sampling scheme, ZERO rows had all four excipients
+    # (binder, PVPP, MgSt, MCC) simultaneously within 10% of their own
+    # minimum. That's exactly the region NSGA-II converged to once the
+    # loss-scaling fix let it search freely — because the network had
+    # never seen anything there, its prediction was unconstrained
+    # extrapolation, and it happened to (incorrectly) predict near-zero
+    # EFRF, which the optimizer then exploited relentlessly. Mixing in an
+    # explicit boundary-augmented sample set closes that blind spot.
+    comps = _sample_compositions(n_samples, rng, boundary_fraction=BOUNDARY_FRACTION)
     comps = comps / comps.sum(axis=1, keepdims=True) * 100.0
     api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = comps.T
 
@@ -260,7 +297,7 @@ class InputScaler:
 # trained under the old, scale-imbalanced loss (which had learned to
 # essentially ignore EFRF). If you're iterating further, bump this again
 # any time train_model()'s loss/data-generation logic changes.
-CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'co_hybai_v29_28_r32_v2.pt')
+CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'co_hybai_v29_28_r32_v3.pt')
 
 @st.cache_resource(show_spinner=False)
 def train_model():
