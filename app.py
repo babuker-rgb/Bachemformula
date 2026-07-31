@@ -1,5 +1,5 @@
 # ================================================================
-# Hybrid AI v30.2-NX-Fast · FAST & DEEP MODES
+# Hybrid AI v31.0-Gradual · 5-Level Depth Gradient
 # Multi-Objective Tablet Optimization
 # ================================================================
 
@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 import plotly.graph_objects as go
 import time
 import warnings
@@ -24,7 +23,7 @@ warnings.filterwarnings('ignore')
 # ================================================================
 # PAGE CONFIG & CONSTANTS
 # ================================================================
-st.set_page_config(page_title="Hybrid AI v30.2-NX-Fast", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Hybrid AI v31.0-Gradual", page_icon="🧬", layout="wide")
 
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -119,9 +118,9 @@ class HybridTabletModel(nn.Module):
         return np.mean(preds, axis=0), np.std(preds, axis=0)
 
 # ================================================================
-# 3. OPTIMIZER (Soft Penalty + NSGA-III naming)
+# 3. OPTIMIZER 
 # ================================================================
-class AdvancedOptimizer:
+class GradualOptimizer:
     def __init__(self, model, scaler, pop_size=80, generations=80, y_train_mean=None):
         self.model = model
         self.scaler = scaler
@@ -206,61 +205,76 @@ class AdvancedOptimizer:
             yield pop, obj, history, gen
 
 # ================================================================
-# 4. FAST / DEEP TRAINING LOGIC
+# 4. PHYSICS-BASED LOSS (For Deep & Ultimate Levels)
 # ================================================================
-CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_nx_fast.pt')
+def calculate_heckel_density(pressure, binder):
+    # Simplified Kawakita/Heckel equation simulation
+    # Density = base + pressure contribution - binder interference
+    return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
+
+# ================================================================
+# 5. TRAINING LOOP (WITH GRADUAL SCALING)
+# ================================================================
+CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_v31.pt')
 
 @st.cache_resource(show_spinner=False)
-def train_model(mode='Fast'):
-    # Mode parameters
-    if mode == 'Fast':
-        n_samples = 5000
-        epochs = 500
-        patience = 50
-        batch_size = 256
-    else:
-        n_samples = 10000
-        epochs = 2000
-        patience = 100
-        batch_size = 512 # Larger batch for Deep mode
-
-    X, y = generate_synthetic_data(n_samples=n_samples)
+def train_model(level=3):
+    # 1. Hyperparameter scaling based on level
+    config = {
+        1: {'samples': 3000, 'epochs': 300, 'hidden': 256, 'batch': 256, 'physics': False},
+        2: {'samples': 5000, 'epochs': 500, 'hidden': 384, 'batch': 256, 'physics': False},
+        3: {'samples': 10000, 'epochs': 1000, 'hidden': 512, 'batch': 256, 'physics': False},
+        4: {'samples': 20000, 'epochs': 2000, 'hidden': 768, 'batch': 256, 'physics': True},
+        5: {'samples': 50000, 'epochs': 4000, 'hidden': 1024, 'batch': 512, 'physics': True}
+    }
+    c = config[level]
+    
+    X, y = generate_synthetic_data(n_samples=c['samples'])
     scaler = InputScaler().fit(X)
     X_scaled = scaler.transform(X)
     
     X_t = torch.tensor(X_scaled, dtype=torch.float32)
     y_t = torch.tensor(y, dtype=torch.float32)
-    
-    dataset = TensorDataset(X_t, y_t)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    model = HybridTabletModel(input_dim=8, hidden_dim=512)
+    model = HybridTabletModel(input_dim=8, hidden_dim=c['hidden'])
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     
     target_var = y_t.var(dim=0, unbiased=False)
     target_var = torch.clamp(target_var, min=1e-6)
-    def weighted_mse(pred, true): return (((pred - true) ** 2) / target_var).mean()
+    def mse(pred, true): return (((pred - true) ** 2) / target_var).mean()
     
-    history = {'loss': [], 'r2': []}
+    # Physics Variables for Level 4 & 5
+    pressure_input = X[:, 6]
+    binder_input = X[:, 1]
+    
+    history = {'loss': [], 'r2': [], 'level': level}
     best_loss = np.inf
     patience_counter = 0
     
-    for epoch in range(epochs):
+    for epoch in range(c['epochs']):
         model.train()
-        epoch_loss = 0
-        for batch_x, batch_y in dataloader:
-            optimizer.zero_grad()
-            pred = model(batch_x)
-            loss = weighted_mse(pred, batch_y)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            epoch_loss += loss.item() * batch_x.size(0)
+        optimizer.zero_grad()
+        pred = model(X_t)
+        
+        # Standard Loss
+        loss = mse(pred, y_t)
+        
+        # Gradual Physics Constraints (Level 4 and 5)
+        if c['physics']:
+            # Predicted density is column 0 of output
+            predicted_density = pred[:, 0]
+            physical_density = torch.tensor(calculate_heckel_density(pressure_input, binder_input), dtype=torch.float32)
+            # Add a penalty for deviation from physical laws
+            physics_loss = torch.mean((predicted_density - physical_density) ** 2) * 0.1
+            loss += physics_loss
+            
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
         
         if epoch % 100 == 0:
             model.eval()
             with torch.no_grad():
-                val_loss = weighted_mse(model(X_t), y_t).item()
+                val_loss = mse(model(X_t), y_t).item()
                 history['loss'].append(val_loss)
                 ss_res = ((y_t - model(X_t)) ** 2).sum(dim=0)
                 ss_tot = ((y_t - y_t.mean(dim=0)) ** 2).sum(dim=0)
@@ -270,13 +284,14 @@ def train_model(mode='Fast'):
                     patience_counter = 0
                 else:
                     patience_counter += 1
-                    if patience_counter >= patience:
+                    # Early stopping patience scales with depth
+                    if patience_counter >= (c['epochs'] // 10):
                         break
     model.eval()
     return model, scaler, history
 
 # ================================================================
-# 5. ANALYSIS & UI FUNCTIONS
+# 6. ANALYSIS & UI FUNCTIONS
 # ================================================================
 def perform_sensitivity_analysis(model, scaler, ref_solution):
     try:
@@ -293,7 +308,7 @@ def perform_sensitivity_analysis(model, scaler, ref_solution):
 def render_3d_pareto(pop, obj, golden_idx):
     fig = go.Figure(data=[go.Scatter3d(x=pop[:, 0], y=obj[:, 3], z=-obj[:, 1], mode='markers', 
                                       marker=dict(size=4, color=pop[:, 0], colorscale='Viridis'), name='Pareto')])
-    if golden_idx is not None and golden_idx < len(pop):
+    if golden_idx is not None:
         fig.add_trace(go.Scatter3d(x=[pop[golden_idx, 0]], y=[obj[golden_idx, 3]], z=[-obj[golden_idx, 1]], 
                                   mode='markers', marker=dict(size=15, color='gold', symbol='diamond'), name='Golden'))
     fig.update_layout(scene=dict(xaxis_title='API (%)', yaxis_title='EFRF', zaxis_title='Tensile (MPa)'), height=450)
@@ -312,30 +327,47 @@ def render_dynamic_radar(solutions_df, selected_solutions):
     st.plotly_chart(fig, use_container_width=True)
 
 # ================================================================
-# 6. MAIN APPLICATION
+# 7. MAIN APPLICATION
 # ================================================================
 def main():
-    st.title("⚡ Hybrid AI v30.2-NX-Fast · Swift Optimizer")
+    st.title("🧬 Hybrid AI v31.0-Gradual · 5-Level Depth")
     
-    # Sidebar Mode Selection
-    st.sidebar.header("⚙️ Mode Settings")
-    mode = st.sidebar.radio("Select Mode", ["Fast Mode", "Deep Mode"], index=0)
-    st.sidebar.info(f"**{mode}** is active.")
+    st.sidebar.header("⚙️ Depth Settings")
+    # Gradual Level Selector
+    level = st.sidebar.select_slider(
+        "Select Depth Level",
+        options=[1, 2, 3, 4, 5],
+        value=3,
+        format_func=lambda x: {
+            1: "L1 - Quick (3k samp)",
+            2: "L2 - Standard (5k samp)",
+            3: "L3 - Balanced (10k samp)",
+            4: "L4 - Deep (20k samp + Physics)",
+            5: "L5 - Ultimate (50k samp + Physics)"
+        }.get(x, str(x))
+    )
     
-    if mode == "Fast Mode":
-        pop_size, generations = 100, 40
-        run_sensitivity = st.sidebar.checkbox("Enable Sensitivity Analysis (slower)", value=False)
-    else:
-        pop_size, generations = 80, 80
-        run_sensitivity = st.sidebar.checkbox("Enable Sensitivity Analysis", value=True)
+    # Define params for this level
+    level_params = {
+        1: {"samples": "3,000", "epochs": "300", "gen": 30, "pop": 100, "physics": "❌"},
+        2: {"samples": "5,000", "epochs": "500", "gen": 40, "pop": 100, "physics": "❌"},
+        3: {"samples": "10,000", "epochs": "1,000", "gen": 60, "pop": 100, "physics": "❌"},
+        4: {"samples": "20,000", "epochs": "2,000", "gen": 80, "pop": 120, "physics": "✅ Heckel"},
+        5: {"samples": "50,000", "epochs": "4,000", "gen": 120, "pop": 150, "physics": "✅ Heckel"}
+    }
     
-    with st.spinner(f"Loading Physics-Informed Model ({mode})..."):
-        model, scaler, history = train_model(mode=mode.split()[0])
+    with st.sidebar.expander("📊 Current Level Details", expanded=True):
+        p = level_params[level]
+        st.markdown(f"**Samples:** {p['samples']}\n\n**Epochs:** {p['epochs']}\n\n**Generations:** {p['gen']}\n\n**Population:** {p['pop']}\n\n**Physics Constraints:** {p['physics']}")
+
+    enable_sensitivity = st.sidebar.checkbox("Enable Sensitivity Analysis", value=True if level>=3 else False)
+    
+    with st.spinner(f"Loading Model (Level {level})..."):
+        model, scaler, history = train_model(level=level)
     
     st.sidebar.header("⚖️ Custom Recommender")
     w_api = st.sidebar.slider("Weight for API", 0.0, 1.0, 0.4)
     w_quality = st.sidebar.slider("Weight for Quality", 0.0, 1.0, 0.6)
-    st.sidebar.info("The system will prioritize solutions matching your preferences.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -350,17 +382,20 @@ def main():
         pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX, 200.0)
         speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX, 20.0)
 
-    if st.button("🚀 Run Advanced Optimization"):
+    if st.button("🚀 Run Gradual Optimization"):
         start_time = time.time()
-        with st.status(f"Running NSGA-III + Adaptive Mutation ({mode})...", expanded=True) as status:
+        gen_count = p['gen']
+        pop_count = p['pop']
+        
+        with st.status(f"Running NSGA-III + Adaptive Mutation (Level {level})...", expanded=True) as status:
             progress_bar = st.progress(0)
-            optimizer = AdvancedOptimizer(model, scaler, pop_size=pop_size, generations=generations)
+            optimizer = GradualOptimizer(model, scaler, pop_size=pop_count, generations=gen_count)
             final_pop, final_obj = None, None
             for i, (pop, obj, gen_hist, gen) in enumerate(optimizer.optimize()):
                 final_pop, final_obj = pop, obj
-                progress_bar.progress((gen+1)/generations)
+                progress_bar.progress((gen+1)/gen_count)
                 if gen % 5 == 0:
-                    status.update(label=f"Generation {gen+1}/{generations} | Diversity: {np.std(pop, axis=0).mean():.3f}")
+                    status.update(label=f"Gen {gen+1}/{gen_count} | Pop: {pop_count}")
             status.update(label="Optimization Complete ✅", state="complete")
         
         weights = np.array([w_api, w_quality])
@@ -378,19 +413,18 @@ def main():
         preds, uncertainty = preds[0], uncertainty[0]
         
         st.success(f"🏆 Golden Solution Found!\nAPI: {best_sol[0]:.2f}% | EFRF: {preds[2]:.3f} ± {uncertainty[2]:.3f}")
-        st.caption(f"Optimization took {time.time() - start_time:.2f} seconds (Mode: {mode}).")
+        st.caption(f"Optimization took {time.time() - start_time:.2f} seconds (Level: {level}).")
         
-        st.subheader("🌐 3D Pareto Front (API - EFRF - Tensile)")
+        st.subheader("🌐 3D Pareto Front")
         render_3d_pareto(final_pop, final_obj, golden_idx)
         
-        # Sensitivity Analysis (Controlled by checkbox)
-        if run_sensitivity:
+        if enable_sensitivity:
             with st.expander("🔬 Sensitivity Analysis (Local)"):
                 sens_data = perform_sensitivity_analysis(model, scaler, best_sol)
                 if sens_data: st.bar_chart(pd.Series(sens_data))
                 else: st.warning("Could not compute local sensitivity.")
         else:
-            st.caption("💡 Sensitivity Analysis is disabled in this mode (Enable in Sidebar to run).")
+            st.caption("💡 Sensitivity Analysis is disabled for this run.")
         
         sol_list = []
         sorted_indices = np.argsort([-results[i] for i in range(len(final_pop))])
@@ -416,13 +450,13 @@ def main():
         # EXPORT
         report = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'mode': mode,
+            'level': level,
             'golden_api': float(best_sol[0]), 
             'golden_efrf': float(preds[2]),
             'golden_tensile': float(preds[1]),
             'top_solutions': sol_df.to_dict('records')
         }
-        st.download_button("📥 Download Full Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="optimization_report_fast.json")
+        st.download_button("📥 Download Full Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="optimization_report_gradual.json")
 
 if __name__ == "__main__":
     main()
