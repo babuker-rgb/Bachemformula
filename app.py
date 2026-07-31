@@ -1,5 +1,5 @@
 # ================================================================
-# Hybrid AI v31.1-FastPhysics-2D · Fixed UI Load Order
+# Hybrid AI v31.2-FastPhysics-2D · Fixed Timeout + Progress Bar
 # ================================================================
 
 import streamlit as st
@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # ================================================================
 # CONFIG
 # ================================================================
-st.set_page_config(page_title="Hybrid AI v31.1-FastPhysics", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Hybrid AI v31.2-FastPhysics", page_icon="🧬", layout="wide")
 
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -111,13 +111,13 @@ def calculate_heckel_density(pressure, binder):
     return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
 
 # ================================================================
-# HEAVY TRAINING LOOP (CACHED)
+# TRAINING LOOP (WITH PROGRESS BAR TO AVOID TIMEOUT)
 # ================================================================
 CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_fastphysics_2d.pt')
 
 @st.cache_resource(show_spinner=False)
-def train_model():
-    # Check for cached model
+def train_model(progress_bar=None):
+    # 1. Load from cache if available
     if os.path.exists(CHECKPOINT_PATH):
         try:
             ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
@@ -128,7 +128,7 @@ def train_model():
         except:
             pass
 
-    # Train from scratch if no cache
+    # 2. Training from scratch with strict progress bar updates
     X, y = generate_synthetic_data()
     scaler = InputScaler().fit(X)
     X_scaled = scaler.transform(X)
@@ -155,6 +155,11 @@ def train_model():
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         
+        # Update Progress Bar every 10 epochs to keep WebSocket Alive
+        if epoch % 10 == 0 and progress_bar is not None:
+            progress_bar.progress(epoch / EPOCHS)
+            time.sleep(0.01) # Allow UI to process update
+        
         if epoch % 100 == 0:
             val = mse(model(X_t), y_t).item()
             if val < best_loss:
@@ -162,7 +167,8 @@ def train_model():
                 patience = 0
             else:
                 patience += 1
-            if patience >= 120: break
+            if patience >= 120: # Early Stopping after 12 consecutive non-improvements
+                break
             
     model.eval()
     torch.save({'model_state': model.state_dict(), 'scaler': scaler}, CHECKPOINT_PATH)
@@ -298,12 +304,11 @@ def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
     st.plotly_chart(fig, use_container_width=True)
 
 # ================================================================
-# MAIN APPLICATION (REORDERED FOR INSTANT UI)
+# MAIN APPLICATION
 # ================================================================
 def main():
-    st.title("🧬 Hybrid AI v31.1-FastPhysics-2D (Instant UI)")
+    st.title("🧬 Hybrid AI v31.2-FastPhysics-2D (No Timeout)")
     
-    # ===== 1. Draw Sidebar and Main Inputs IMMEDIATELY =====
     st.sidebar.header("⚖️ Custom Recommender")
     w_api = st.sidebar.slider("Weight for API", 0.0, 1.0, 0.4)
     w_quality = st.sidebar.slider("Weight for Quality", 0.0, 1.0, 0.6)
@@ -321,21 +326,22 @@ def main():
         pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX, 200.0)
         speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX, 20.0)
 
-    # ===== 2. Heavy Logic runs ONLY when button is clicked =====
     if st.button("🚀 Run Optimization & Show 2D Pareto"):
         
-        # Train / Load model inside the button action
-        with st.spinner("Loading/Training FastPhysics Model (1st time takes 15-30s)..."):
-            model, scaler = train_model()
-        
+        # Train / Load Model with Progress Bar to prevent Timeout
+        with st.spinner("Training/Loading Physics Model..."):
+            progress_bar = st.progress(0)
+            model, scaler = train_model(progress_bar=progress_bar)
+            progress_bar.progress(1.0)
+            
         start_time = time.time()
         with st.status("Running NSGA-II Optimization...", expanded=True) as status:
-            progress_bar = st.progress(0)
+            progress_opt = st.progress(0)
             optimizer = FastOptimizer(model, scaler)
             final_pop, final_obj = None, None
             for i, (pop, obj, gen) in enumerate(optimizer.optimize()):
                 final_pop, final_obj = pop, obj
-                progress_bar.progress((gen+1)/GENERATIONS)
+                progress_opt.progress((gen+1)/GENERATIONS)
                 if gen % 5 == 0:
                     status.update(label=f"Generation {gen+1}/{GENERATIONS}")
             status.update(label="Optimization Complete ✅", state="complete")
