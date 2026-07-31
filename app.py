@@ -1,5 +1,5 @@
 # ================================================================
-# Hybrid AI v31.2-FastPhysics-2D · Fixed Timeout + Progress Bar
+# Hybrid AI v31.3-FastPhysics-2D · Fixed SessionState Hash Error
 # ================================================================
 
 import streamlit as st
@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # ================================================================
 # CONFIG
 # ================================================================
-st.set_page_config(page_title="Hybrid AI v31.2-FastPhysics", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Hybrid AI v31.3-FastPhysics", page_icon="🧬", layout="wide")
 
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -111,12 +111,12 @@ def calculate_heckel_density(pressure, binder):
     return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
 
 # ================================================================
-# TRAINING LOOP (WITH PROGRESS BAR TO AVOID TIMEOUT)
+# FIXED TRAINING LOOP (WITHOUT UNSHASHABLE PROGRESS BAR ARG)
 # ================================================================
 CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_fastphysics_2d.pt')
 
 @st.cache_resource(show_spinner=False)
-def train_model(progress_bar=None):
+def train_model():
     # 1. Load from cache if available
     if os.path.exists(CHECKPOINT_PATH):
         try:
@@ -128,7 +128,7 @@ def train_model(progress_bar=None):
         except:
             pass
 
-    # 2. Training from scratch with strict progress bar updates
+    # 2. Training from scratch 
     X, y = generate_synthetic_data()
     scaler = InputScaler().fit(X)
     X_scaled = scaler.transform(X)
@@ -155,10 +155,11 @@ def train_model(progress_bar=None):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         
-        # Update Progress Bar every 10 epochs to keep WebSocket Alive
-        if epoch % 10 == 0 and progress_bar is not None:
-            progress_bar.progress(epoch / EPOCHS)
-            time.sleep(0.01) # Allow UI to process update
+        # Update Progress Bar via session_state to avoid UnhashableParamError
+        if epoch % 10 == 0:
+            if '_train_pb' in st.session_state and st.session_state['_train_pb'] is not None:
+                st.session_state['_train_pb'].progress(epoch / EPOCHS)
+            time.sleep(0.01) # Keep the UI responsive
         
         if epoch % 100 == 0:
             val = mse(model(X_t), y_t).item()
@@ -167,7 +168,7 @@ def train_model(progress_bar=None):
                 patience = 0
             else:
                 patience += 1
-            if patience >= 120: # Early Stopping after 12 consecutive non-improvements
+            if patience >= 120: # Early Stopping
                 break
             
     model.eval()
@@ -307,7 +308,7 @@ def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
 # MAIN APPLICATION
 # ================================================================
 def main():
-    st.title("🧬 Hybrid AI v31.2-FastPhysics-2D (No Timeout)")
+    st.title("🧬 Hybrid AI v31.3-FastPhysics-2D (Stable Cache)")
     
     st.sidebar.header("⚖️ Custom Recommender")
     w_api = st.sidebar.slider("Weight for API", 0.0, 1.0, 0.4)
@@ -328,11 +329,15 @@ def main():
 
     if st.button("🚀 Run Optimization & Show 2D Pareto"):
         
-        # Train / Load Model with Progress Bar to prevent Timeout
+        # Store progress bar in session_state first!
+        progress_bar = st.progress(0)
+        st.session_state['_train_pb'] = progress_bar
+        
+        # Train / Load Model 
         with st.spinner("Training/Loading Physics Model..."):
-            progress_bar = st.progress(0)
-            model, scaler = train_model(progress_bar=progress_bar)
-            progress_bar.progress(1.0)
+            # Note: progress_bar is NOT passed as an argument to train_model!
+            model, scaler = train_model()
+            st.session_state['_train_pb'].progress(1.0)
             
         start_time = time.time()
         with st.status("Running NSGA-II Optimization...", expanded=True) as status:
