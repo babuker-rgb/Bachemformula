@@ -1,5 +1,5 @@
 # ================================================================
-# Hybrid AI v31.0-Gradual · 5-Level Depth Gradient
+# Hybrid AI v31.1-Gradual · Fixed Pareto & Sensitivity
 # Multi-Objective Tablet Optimization
 # ================================================================
 
@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 # ================================================================
 # PAGE CONFIG & CONSTANTS
 # ================================================================
-st.set_page_config(page_title="Hybrid AI v31.0-Gradual", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Hybrid AI v31.1-Gradual", page_icon="🧬", layout="wide")
 
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -296,21 +296,40 @@ def train_model(level=3):
 def perform_sensitivity_analysis(model, scaler, ref_solution):
     try:
         rf = RandomForestRegressor(n_estimators=50)
-        X_local = np.random.normal(loc=ref_solution, scale=0.05*np.abs(ref_solution), size=(200, 8))
+        # FIX: Increased local samples to 500 and added clipping to valid bounds
+        bounds_min = np.array([API_MIN, BINDER_MIN, PVPP_MIN, MGST_MIN, MCC_MIN, MOISTURE_MIN, PRESSURE_MIN, SPEED_MIN])
+        bounds_max = np.array([API_MAX, BINDER_MAX, PVPP_MAX, MGST_MAX, MCC_MAX, MOISTURE_MAX, PRESSURE_MAX, SPEED_MAX])
+        
+        X_local = np.random.normal(loc=ref_solution, scale=0.05*np.abs(ref_solution), size=(500, 8))
+        X_local = np.clip(X_local, bounds_min, bounds_max)
+        
         X_scaled = scaler.transform(X_local)
         y_local = model(torch.tensor(X_scaled, dtype=torch.float32)).numpy()[:, 0]
         rf.fit(X_scaled, y_local)
         perm_importance = permutation_importance(rf, X_scaled, y_local)
         feature_names = ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture', 'Pressure', 'Speed']
         return dict(zip(feature_names, perm_importance.importances_mean))
-    except: return None
+    except Exception as e:
+        return None
 
-def render_3d_pareto(pop, obj, golden_idx):
+def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
     fig = go.Figure(data=[go.Scatter3d(x=pop[:, 0], y=obj[:, 3], z=-obj[:, 1], mode='markers', 
                                       marker=dict(size=4, color=pop[:, 0], colorscale='Viridis'), name='Pareto')])
     if golden_idx is not None:
         fig.add_trace(go.Scatter3d(x=[pop[golden_idx, 0]], y=[obj[golden_idx, 3]], z=[-obj[golden_idx, 1]], 
                                   mode='markers', marker=dict(size=15, color='gold', symbol='diamond'), name='Golden'))
+    
+    # FIX: Add Tested Formulation (Blue Dot) if data is provided
+    if tested_data is not None:
+        fig.add_trace(go.Scatter3d(
+            x=[tested_data['api']], 
+            y=[tested_data['efrf']], 
+            z=[tested_data['tensile']],
+            mode='markers', 
+            marker=dict(size=12, color='blue', symbol='circle', line=dict(color='white', width=1)), 
+            name='Tested Formulation'
+        ))
+        
     fig.update_layout(scene=dict(xaxis_title='API (%)', yaxis_title='EFRF', zaxis_title='Tensile (MPa)'), height=450)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -330,7 +349,7 @@ def render_dynamic_radar(solutions_df, selected_solutions):
 # 7. MAIN APPLICATION
 # ================================================================
 def main():
-    st.title("🧬 Hybrid AI v31.0-Gradual · 5-Level Depth")
+    st.title("🧬 Hybrid AI v31.1-Gradual · Tested Point & Sensitivity Fix")
     
     st.sidebar.header("⚙️ Depth Settings")
     # Gradual Level Selector
@@ -414,18 +433,39 @@ def main():
         
         st.success(f"🏆 Golden Solution Found!\nAPI: {best_sol[0]:.2f}% | EFRF: {preds[2]:.3f} ± {uncertainty[2]:.3f}")
         st.caption(f"Optimization took {time.time() - start_time:.2f} seconds (Level: {level}).")
+
+        # =========================================================
+        # NEW: Compute Current Slider Formulation (Tested Solution)
+        # =========================================================
+        slider_form = np.array([[api, binder, pvpp, mgst, mcc, moisture, pressure, speed]], dtype=np.float32)
+        slider_scaled = scaler.transform(slider_form)
+        slider_preds = model.predict_with_uncertainty(torch.tensor(slider_scaled, dtype=torch.float32))[0][0]
         
-        st.subheader("🌐 3D Pareto Front")
-        render_3d_pareto(final_pop, final_obj, golden_idx)
+        tested_data = {
+            'api': float(api),
+            'efrf': float(slider_preds[2]),
+            'tensile': float(slider_preds[1])
+        }
         
+        st.subheader("🌐 3D Pareto Front (Blue dot = Your current formulation)")
+        render_3d_pareto(final_pop, final_obj, golden_idx, tested_data=tested_data)
+        
+        # =========================================================
+        # Sensitivity Analysis (Enhanced Stability)
+        # =========================================================
         if enable_sensitivity:
             with st.expander("🔬 Sensitivity Analysis (Local)"):
                 sens_data = perform_sensitivity_analysis(model, scaler, best_sol)
-                if sens_data: st.bar_chart(pd.Series(sens_data))
-                else: st.warning("Could not compute local sensitivity.")
+                if sens_data:
+                    st.bar_chart(pd.Series(sens_data))
+                else:
+                    st.warning("Sensitivity Analysis encountered an error. Please try increasing the Depth Level.")
         else:
             st.caption("💡 Sensitivity Analysis is disabled for this run.")
         
+        # =========================================================
+        # Top Solutions & Radar
+        # =========================================================
         sol_list = []
         sorted_indices = np.argsort([-results[i] for i in range(len(final_pop))])
         for idx in sorted_indices[:10]:
@@ -447,14 +487,17 @@ def main():
             st.subheader("📊 Dynamic Radar Comparison")
             render_dynamic_radar(sol_df, selected)
         
-        # EXPORT
+        # =========================================================
+        # Export
+        # =========================================================
         report = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'level': level,
             'golden_api': float(best_sol[0]), 
             'golden_efrf': float(preds[2]),
             'golden_tensile': float(preds[1]),
-            'top_solutions': sol_df.to_dict('records')
+            'top_solutions': sol_df.to_dict('records'),
+            'tested_formulation': tested_data
         }
         st.download_button("📥 Download Full Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="optimization_report_gradual.json")
 
