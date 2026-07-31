@@ -1,5 +1,5 @@
 # ================================================================
-# Hybrid AI v31.0-FastPhysics-2D · API% vs EFRF Pareto
+# Hybrid AI v31.1-FastPhysics-2D · Fixed UI Load Order
 # ================================================================
 
 import streamlit as st
@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 # ================================================================
 # CONFIG
 # ================================================================
-st.set_page_config(page_title="Hybrid AI v31.0-FastPhysics-2D", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="Hybrid AI v31.1-FastPhysics", page_icon="🧬", layout="wide")
 
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -32,10 +32,8 @@ PRESSURE_MIN, PRESSURE_MAX = 150.0, 250.0
 SPEED_MIN, SPEED_MAX = 15.0, 30.0
 EFRF_THRESHOLD = 0.40
 
-# FastPhysics User Parameters
 SAMPLES = 20000
 EPOCHS = 1200
-BATCH_SIZE = 512
 GENERATIONS = 60
 POP_SIZE = 120
 
@@ -113,12 +111,24 @@ def calculate_heckel_density(pressure, binder):
     return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
 
 # ================================================================
-# FAST TRAINING LOOP
+# HEAVY TRAINING LOOP (CACHED)
 # ================================================================
 CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_fastphysics_2d.pt')
 
 @st.cache_resource(show_spinner=False)
 def train_model():
+    # Check for cached model
+    if os.path.exists(CHECKPOINT_PATH):
+        try:
+            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+            model = HybridTabletModel(input_dim=8, hidden_dim=512)
+            model.load_state_dict(ckpt['model_state'])
+            model.eval()
+            return model, ckpt['scaler']
+        except:
+            pass
+
+    # Train from scratch if no cache
     X, y = generate_synthetic_data()
     scaler = InputScaler().fit(X)
     X_scaled = scaler.transform(X)
@@ -138,12 +148,9 @@ def train_model():
         opt.zero_grad()
         pred = model(X_t)
         loss = mse(pred, y_t)
-        
-        # Physics Loss (Heckel)
         physical = torch.tensor(calculate_heckel_density(pressure_input, binder_input), dtype=torch.float32)
         physics_loss = torch.mean((pred[:, 0] - physical) ** 2) * 0.1
         loss += physics_loss
-        
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
@@ -155,13 +162,14 @@ def train_model():
                 patience = 0
             else:
                 patience += 1
-            if patience >= 120: break # Early Stopping
+            if patience >= 120: break
             
     model.eval()
+    torch.save({'model_state': model.state_dict(), 'scaler': scaler}, CHECKPOINT_PATH)
     return model, scaler
 
 # ================================================================
-# OPTIMIZER (NSGA-II + Adaptive Mutation)
+# OPTIMIZER
 # ================================================================
 class FastOptimizer:
     def __init__(self, model, scaler, pop_size=POP_SIZE, generations=GENERATIONS):
@@ -191,9 +199,8 @@ class FastOptimizer:
             pred = self.model(torch.tensor(pop_scaled, dtype=torch.float32)).numpy()
         density, tensile, efrf = pred[:, 0], pred[:, 1], pred[:, 2]
         penalty = 1.0 / (1.0 + np.clip(np.abs(pop_scaled) - 2.5, 0, None).sum(axis=1))
-        # [ -Dens, -Tens, -API, EFRF ]
         fitness = np.column_stack([-density*penalty, -tensile*penalty, -pop[:,0]*penalty, efrf*penalty])
-        fitness[:, 3] += np.maximum(0, efrf - EFRF_THRESHOLD) * 20.0 # Soft EFRF penalty
+        fitness[:, 3] += np.maximum(0, efrf - EFRF_THRESHOLD) * 20.0
         return fitness
 
     def optimize(self):
@@ -234,13 +241,12 @@ class FastOptimizer:
             yield pop, obj, gen
 
 # ================================================================
-# MAIN APP & 2D PLOTTING FUNCTION
+# 2D PLOTTING FUNCTION
 # ================================================================
 def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
     api_vals = pop[:, 0]
-    efrf_vals = obj[:, 3] # EFRF is the 4th objective column
+    efrf_vals = obj[:, 3]
     
-    # Filter to strictly obey boundaries for visualization
     valid_mask = (api_vals >= API_MIN) & (api_vals <= API_MAX) & (efrf_vals <= EFRF_THRESHOLD)
     api_vals, efrf_vals = api_vals[valid_mask], efrf_vals[valid_mask]
     
@@ -248,11 +254,9 @@ def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
         st.warning("No solutions strictly meet the hard constraints.")
         return
 
-    # Sort by API and compute the lower boundary (Pareto Front)
     sort_idx = np.argsort(api_vals)
     api_sorted, efrf_sorted = api_vals[sort_idx], efrf_vals[sort_idx]
     
-    # Keep only the dominant points (min EFRF for increasing API)
     pareto_api, pareto_efrf = [], []
     min_efrf_so_far = np.inf
     for a, e in zip(api_sorted, efrf_sorted):
@@ -267,7 +271,6 @@ def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
         line=dict(color='red', width=2), marker=dict(size=6, color='#a3c4f3', line=dict(width=1, color='black'))
     ))
 
-    # Golden Solution
     if golden_idx is not None:
         g_api = pop[golden_idx, 0]
         g_efrf = obj[golden_idx, 3]
@@ -276,18 +279,15 @@ def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
             marker=dict(size=16, color='gold', symbol='star', line=dict(width=1.5, color='black'))
         ))
 
-    # Tested Formulation (Blue dot)
     if tested_data is not None:
         fig.add_trace(go.Scatter(
             x=[tested_data['api']], y=[tested_data['efrf']], mode='markers', name='🔵 Tested Formulation',
             marker=dict(size=12, color='blue', symbol='circle', line=dict(width=1, color='white'))
         ))
 
-    # Hard Boundaries
     fig.add_vline(x=API_MIN, line_dash='dash', line_color='gray', annotation_text=f'API min ({API_MIN}%)')
     fig.add_vline(x=API_MAX, line_dash='dash', line_color='gray', annotation_text=f'API max ({API_MAX}%)')
     fig.add_hline(y=EFRF_THRESHOLD, line_dash='dash', line_color='gray', annotation_text=f'EFRF limit ({EFRF_THRESHOLD})')
-    fig.add_hline(y=0, line_dash='dot', line_color='white')
 
     fig.update_layout(
         title='2D Pareto Front: API% vs EFRF',
@@ -297,12 +297,13 @@ def render_2d_pareto(pop, obj, golden_idx, tested_data=None):
     )
     st.plotly_chart(fig, use_container_width=True)
 
+# ================================================================
+# MAIN APPLICATION (REORDERED FOR INSTANT UI)
+# ================================================================
 def main():
-    st.title("🧬 Hybrid AI v31.0-FastPhysics-2D")
+    st.title("🧬 Hybrid AI v31.1-FastPhysics-2D (Instant UI)")
     
-    with st.spinner("Loading FastPhysics Model..."):
-        model, scaler = train_model()
-    
+    # ===== 1. Draw Sidebar and Main Inputs IMMEDIATELY =====
     st.sidebar.header("⚖️ Custom Recommender")
     w_api = st.sidebar.slider("Weight for API", 0.0, 1.0, 0.4)
     w_quality = st.sidebar.slider("Weight for Quality", 0.0, 1.0, 0.6)
@@ -320,9 +321,15 @@ def main():
         pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX, 200.0)
         speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX, 20.0)
 
+    # ===== 2. Heavy Logic runs ONLY when button is clicked =====
     if st.button("🚀 Run Optimization & Show 2D Pareto"):
+        
+        # Train / Load model inside the button action
+        with st.spinner("Loading/Training FastPhysics Model (1st time takes 15-30s)..."):
+            model, scaler = train_model()
+        
         start_time = time.time()
-        with st.status("Running NSGA-II (FastPhysics Mode)...", expanded=True) as status:
+        with st.status("Running NSGA-II Optimization...", expanded=True) as status:
             progress_bar = st.progress(0)
             optimizer = FastOptimizer(model, scaler)
             final_pop, final_obj = None, None
@@ -333,7 +340,7 @@ def main():
                     status.update(label=f"Generation {gen+1}/{GENERATIONS}")
             status.update(label="Optimization Complete ✅", state="complete")
         
-        # Custom Recommender Scoring
+        # Recommender Scoring
         weights = np.array([w_api, w_quality])
         results = []
         for i in range(len(final_pop)):
@@ -342,7 +349,7 @@ def main():
         golden_idx = np.argmax(results)
         best_sol = final_pop[golden_idx]
         
-        # Predict with uncertainty
+        # Predict Uncertainty
         pop_scaled = scaler.transform([best_sol])
         preds, uncertainty = model.predict_with_uncertainty(torch.tensor(pop_scaled, dtype=torch.float32))
         preds, uncertainty = preds[0], uncertainty[0]
@@ -350,15 +357,15 @@ def main():
         st.success(f"🏆 Golden Solution Found!\nAPI: {best_sol[0]:.2f}% | EFRF: {preds[2]:.3f} ± {uncertainty[2]:.3f}")
         st.caption(f"Optimization took {time.time() - start_time:.2f} seconds.")
 
-        # Compute current slider formulation (Tested Data)
+        # Evaluate current slider formulation (Tested Data)
         slider_form = np.array([[api, binder, pvpp, mgst, mcc, moisture, pressure, speed]], dtype=np.float32)
         slider_preds, _ = model.predict_with_uncertainty(torch.tensor(scaler.transform(slider_form), dtype=torch.float32))
         tested_data = {'api': float(api), 'efrf': float(slider_preds[0][2])}
         
-        # Render 2D Pareto Chart (API% vs EFRF)
+        # Render 2D Chart
         render_2d_pareto(final_pop, final_obj, golden_idx, tested_data=tested_data)
 
-        # Export JSON Report
+        # Export Report
         report = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'golden_api': float(best_sol[0]), 'golden_efrf': float(preds[2]),
