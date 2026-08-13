@@ -9,6 +9,7 @@
 #     enhanced loss, MC-Dropout uncertainty, OOD shrinkage,
 #     monotonicity/boundary/MCC/density penalties, explicit EFRF loss)
 #   - PDF report generation from v32.1 (full professional report)
+#   - Dashboard panel for real‑time training/optimisation status
 #
 # Also includes:
 #   - Real data support (CSV upload) with fingerprint-based caching
@@ -1109,6 +1110,96 @@ def get_current_formulation_results(return_std=False):
     return result
 
 # ================================================================
+# DASHBOARD (new in v32.5)
+# ================================================================
+def render_dashboard():
+    """Dashboard panel showing training and optimisation status with quick download links."""
+    st.markdown("## 📊 Dashboard")
+    
+    # Retrieve data from session_state
+    history = st.session_state.get('_trained_history', {})
+    runtime = st.session_state.get('runtime', 0)
+    solutions = st.session_state.get('best_solutions', [])
+    golden = st.session_state.get('golden_solution', None)
+    gen_history = st.session_state.get('pareto_history', [])
+    opt_complete = st.session_state.get('optimization_complete', False)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # ---------- Column 1: Training Status ----------
+    with col1:
+        st.markdown("### 🧠 Training Status")
+        if history and len(history.get('loss', [])) > 0:
+            total_loss = history['loss'][-1] if history['loss'] else None
+            data_loss = history.get('data', [None])[-1] if history.get('data') else None
+            physics_loss = history.get('physics', [None])[-1] if history.get('physics') else None
+            
+            st.metric("Total Loss", f"{total_loss:.6f}" if total_loss else "—")
+            st.metric("Data Loss", f"{data_loss:.6f}" if data_loss else "—")
+            st.metric("Physics Loss", f"{physics_loss:.6f}" if physics_loss else "—")
+            
+            n_samples = history.get('n_samples', '?')
+            st.caption(f"Trained on {n_samples} samples")
+        else:
+            st.info("No training data yet. Run optimisation first.")
+    
+    # ---------- Column 2: Optimisation Status ----------
+    with col2:
+        st.markdown("### ⚙️ Optimisation Status")
+        if gen_history:
+            generations = len(gen_history)
+            pareto_count = len(solutions) if solutions else 0
+            st.metric("Generations", f"{generations} / {NSGA_GENERATIONS}")
+            st.metric("Pareto Solutions", f"{pareto_count}")
+            if golden:
+                st.metric("Best API%", f"{golden['API (%)']:.2f}%")
+                st.metric("Best EFRF", f"{golden['EFRF']:.4f}")
+            else:
+                st.caption("No golden solution yet.")
+        else:
+            st.info("Optimisation not yet run.")
+        
+        if runtime:
+            st.metric("⏱️ Runtime", f"{runtime:.1f}s")
+    
+    # ---------- Column 3: Quick Reports ----------
+    with col3:
+        st.markdown("### 📥 Quick Reports")
+        if opt_complete and solutions:
+            # CSV
+            df = pd.DataFrame(solutions)
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="📊 CSV Report",
+                data=csv,
+                file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dashboard_csv"
+            )
+            # JSON
+            if golden:
+                json_report = {
+                    'timestamp': datetime.now().isoformat(),
+                    'golden_solution': golden,
+                    'all_solutions': solutions,
+                    'data_source': st.session_state.data_source
+                }
+                st.download_button(
+                    label="📄 JSON Report",
+                    data=json.dumps(json_report, indent=2, default=str),
+                    file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key="dashboard_json"
+                )
+            # PDF – we cannot easily generate PDF here without all parameters,
+            # so we point the user to the full PDF in the Report tab.
+            st.info("📄 Full PDF report available in the **Report** tab above.")
+        else:
+            st.caption("Run optimisation to enable downloads.")
+
+# ================================================================
 # UI RENDER FUNCTIONS (from v32.3, with uncertainty & PDF)
 # ================================================================
 def render_sidebar():
@@ -1917,6 +2008,9 @@ def main():
         if run_button:
             _run_optimization(w_api, w_quality)
         elif st.session_state.optimization_complete and st.session_state.results:
+            # Display dashboard first
+            render_dashboard()
+            # Then results
             results = st.session_state.results
             std = results.get('std', None)
             render_results_summary(results, std=std)
