@@ -1,14 +1,7 @@
-# Core dependencies
 streamlit
+torch
 numpy
 pandas
-torch
 plotly
 scikit-learn
-scipy
-matplotlib
-seaborn
-pydantic
-python-dotenv
-joblib
-tqdm
+fpdf
