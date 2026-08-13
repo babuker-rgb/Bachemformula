@@ -1,12 +1,19 @@
 # ================================================================
-# Hybrid AI · Multi-Objective Tablet Optimization (Integrated v32.4)
-# Nile Valley University · Sudan · v29.28‑R32
+# Hybrid AI · Multi-Objective Tablet Optimization (v32.5 Ultimate)
+# Nile Valley University · Sudan · Pharmaceutical Engineering
 #
-# v32.4 NEW:
-#   - Physics‑informed training: Heckel density residual and EFRF
-#     constraint loss added to the weighted MSE loss.
-#   - Physics loss weight = 0.2 (balanced between data fit and physics)
-#   - All v32.3 UI/UX improvements and mass‑balance fixes retained.
+# v32.5 combines:
+#   - UI/UX of v32.3 (custom CSS, tabs, live mass balance, binder grades,
+#     Pareto slider, 3D/radar, sensitivity)
+#   - Physics & technical depth of v32.4 (interaction features,
+#     enhanced loss, MC-Dropout uncertainty, OOD shrinkage,
+#     monotonicity/boundary/MCC/density penalties, explicit EFRF loss)
+#   - PDF report generation from v32.1 (full professional report)
+#
+# Also includes:
+#   - Real data support (CSV upload) with fingerprint-based caching
+#   - Multi-objective NSGA-II (Density, Tensile, EFRF) with API/Tensile penalties
+#   - Comprehensive reporting (PDF, CSV, JSON)
 # ================================================================
 import streamlit as st
 import numpy as np
@@ -19,22 +26,25 @@ import warnings
 import json
 import os
 import tempfile
+import hashlib
 from datetime import datetime
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
-
+from fpdf import FPDF
 warnings.filterwarnings('ignore')
+
 # ================================================================
 # PAGE CONFIG
 # ================================================================
 st.set_page_config(
-    page_title="Hybrid AI · Tablet Optimization v32.4",
+    page_title="Hybrid AI · Tablet Optimization v32.5",
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 # ================================================================
-# THEME / UI POLISH (v32.3)
+# THEME / UI POLISH (from v32.3)
 # ================================================================
 def inject_custom_css():
     st.markdown("""
@@ -89,15 +99,16 @@ def render_header():
     st.markdown("""
     <div class="app-header">
         <h1>🧬 Hybrid AI · Multi-Objective Tablet Optimization</h1>
-        <p>Nile Valley University · Sudan · Pharmaceutical Engineering · v32.4 (Physics‑Informed)</p>
+        <p>Nile Valley University · Sudan · Pharmaceutical Engineering · v32.5 (Ultimate)</p>
     </div>
     """, unsafe_allow_html=True)
 
 def status_badge_html(level, text):
     cls = {'good': 'badge-good', 'warn': 'badge-warn', 'bad': 'badge-bad'}.get(level, 'badge-warn')
     return f'<span class="status-badge {cls}">{text}</span>'
+
 # ================================================================
-# CONSTANTS
+# CONSTANTS (from v32.3, expanded ranges)
 # ================================================================
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -124,8 +135,19 @@ BINDER_GRADE_NAMES = list(BINDER_GRADES.keys())
 POPULATION_SIZE = 50
 NSGA_GENERATIONS = 80
 TRAINING_EPOCHS = 1200
+N_SAMPLES = 8000
+BOUNDARY_FRACTION = 0.30
+
+# Physics loss weights (v32.4 style)
+PHYSICS_LOSS_WEIGHT = 0.1
+EFRF_CONSTRAINT_WEIGHT = 0.1
+MONOTONICITY_WEIGHT = 0.01
+BOUNDARY_WEIGHT = 0.01
+MCC_PENALTY_WEIGHT = 0.1
+DENSITY_PENALTY_WEIGHT = 0.1
+
 # ================================================================
-# SESSION STATE
+# SESSION STATE (same as v32.3)
 # ================================================================
 def initialize_session_state():
     defaults = {
@@ -144,8 +166,9 @@ def initialize_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
 initialize_session_state()
+
 # ================================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (from v32.3)
 # ================================================================
 def normalize_formulation(api, binder, pvpp, mgst, mcc, moisture):
     comps = np.array([api, binder, pvpp, mgst, mcc, moisture])
@@ -157,14 +180,17 @@ def normalize_formulation(api, binder, pvpp, mgst, mcc, moisture):
         'api': norm[0], 'binder': norm[1], 'pvpp': norm[2],
         'mgst': norm[3], 'mcc': norm[4], 'moisture': norm[5], 'total': 100.0
     }
+
 def get_formulation_summary(api, binder, pvpp, mgst, mcc, moisture):
     n = normalize_formulation(api, binder, pvpp, mgst, mcc, moisture)
     return {'API': n['api'], 'Binder': n['binder'], 'PVPP': n['pvpp'],
             'MgSt': n['mgst'], 'MCC': n['mcc'], 'Moisture': n['moisture'],
             'Total': n['total']}
+
 def validate_formulation(api, binder, pvpp, mgst, mcc, moisture):
     total = sum([api, binder, pvpp, mgst, mcc, moisture])
     return (95 <= total <= 105, f"Total is {total:.1f}% – should be ~100%")
+
 def calculate_quality_score(density, tensile, efrf, api=None):
     density_score = min(100, (density / 0.95) * 100)
     tensile_score = min(100, (tensile / 8.5) * 100)
@@ -183,11 +209,56 @@ def calculate_quality_score(density, tensile, efrf, api=None):
         return {'overall': overall, 'density_score': density_score,
                 'tensile_score': tensile_score, 'efrf_score': efrf_score,
                 'weights': weights}
+
 # ================================================================
-# HYBRID NEURAL NETWORK (DROPOUT, UNCERTAINTY)
+# FEATURE ENGINEERING (interaction features from v32.1)
+# ================================================================
+def add_interaction_features(X_raw):
+    """
+    X_raw shape: (n, 8) columns: [API, MCC, PVPP, MgSt, Binder, Pressure, Speed, Granule]
+    Returns augmented array with additional interaction terms.
+    """
+    pressure = X_raw[:, 5:6]
+    binder = X_raw[:, 4:5]
+    api = X_raw[:, 0:1]
+    speed = X_raw[:, 6:7]
+    mcc = X_raw[:, 1:2]
+
+    pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
+    api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
+    binder_speed = np.clip(binder / (speed + 0.1), 0, 100)
+    pressure_binder = pressure * binder
+    pressure_api = pressure * api
+
+    return np.concatenate([
+        X_raw, pressure_binder, pressure_api,
+        pressure_speed, api_mcc, binder_speed
+    ], axis=1)
+
+# ================================================================
+# OOD SHRINKAGE (from v32.1)
+# ================================================================
+def apply_ood_shrinkage(pred, pop_scaled, y_train_mean):
+    """
+    pred: array (n, 5) with columns [density, tensile, efrf, disintegration, dissolution]
+    pop_scaled: scaled input features (n, n_features)
+    y_train_mean: means of training targets [mean_density, mean_tensile, mean_efrf, ...]
+    Returns density, tensile, efrf after shrinkage (disintegration/dissolution untouched).
+    """
+    density, tensile, efrf = pred[..., 0], pred[..., 1], pred[..., 2]
+    ood_z = np.abs(pop_scaled)
+    ood_raw = np.clip(ood_z - 2.0, 0, None).sum(axis=-1)
+    shrink_factor = 1.0 / (1.0 + ood_raw)
+    density = shrink_factor * density + (1 - shrink_factor) * y_train_mean[0]
+    tensile = shrink_factor * tensile + (1 - shrink_factor) * y_train_mean[1]
+    efrf = shrink_factor * efrf + (1 - shrink_factor) * y_train_mean[2]
+    return density, tensile, efrf
+
+# ================================================================
+# HYBRID NEURAL NETWORK (from v32.4)
 # ================================================================
 class HybridTabletModel(nn.Module):
-    def __init__(self, input_dim=8, hidden_dim=256):
+    def __init__(self, input_dim=13, hidden_dim=256):
         super().__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.bn1 = nn.BatchNorm1d(hidden_dim)
@@ -234,6 +305,7 @@ class HybridTabletModel(nn.Module):
             return self.forward(x).numpy()
 
     def predict_with_uncertainty(self, x, n_samples=20):
+        """MC-Dropout for uncertainty."""
         self.train()
         with torch.no_grad():
             if not torch.is_tensor(x):
@@ -242,11 +314,10 @@ class HybridTabletModel(nn.Module):
             preds = self.forward(x_repeat).numpy().reshape(n_samples, -1, 5)
         self.eval()
         return np.mean(preds, 0), np.std(preds, 0)
+
 # ================================================================
-# DATA GENERATION
+# DATA GENERATION (from v32.3, with boundary sampling)
 # ================================================================
-N_SAMPLES = 8000
-BOUNDARY_FRACTION = 0.30
 def _sample_compositions(n_samples, rng, boundary_fraction=0.0):
     bounds = [(API_MIN, API_MAX), (BINDER_MIN, BINDER_MAX), (PVPP_MIN, PVPP_MAX),
               (MGST_MIN, MGST_MAX), (MCC_MIN, MCC_MAX), (MOISTURE_MIN, MOISTURE_MAX)]
@@ -265,6 +336,7 @@ def _sample_compositions(n_samples, rng, boundary_fraction=0.0):
                 jitter = rng.uniform(0, 0.08) * span
                 comps[row, d] = lo + jitter if near_lo else hi - jitter
     return comps
+
 def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
     rng = np.random.default_rng(seed)
     comps = _sample_compositions(n_samples, rng, boundary_fraction=BOUNDARY_FRACTION)
@@ -272,8 +344,9 @@ def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
     api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = comps.T
     pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
     speed = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
-    X = np.column_stack([api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n, pressure, speed])
-    # physical relationships (Heckel-like)
+    granule = rng.uniform(GRANULE_MIN, GRANULE_MAX, n_samples)
+    X_raw = np.column_stack([api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n, pressure, speed])
+    # Generate targets using physical relationships
     porosity0 = 0.45 - 0.001 * (pressure - PRESSURE_MIN) - 0.01 * (binder_n - 3.0)
     density = np.clip(1.0 - porosity0 * np.exp(-0.01 * (pressure - PRESSURE_MIN)), 0.55, 0.95)
     density += rng.normal(0, 0.005, n_samples)
@@ -287,15 +360,16 @@ def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
     efrf += rng.normal(0, 0.03, n_samples)
     efrf = np.clip(efrf, 0.02, 0.98)
     disintegration = (12.0 - 4.0 * (pvpp_n - PVPP_MIN) / (PVPP_MAX - PVPP_MIN)
-                       + 5.0 * (binder_n - BINDER_MIN) / (BINDER_MAX - BINDER_MIN)
-                       + 3.0 * (moisture_n - MOISTURE_MIN) / (MOISTURE_MAX - MOISTURE_MIN))
+                      + 5.0 * (binder_n - BINDER_MIN) / (BINDER_MAX - BINDER_MIN)
+                      + 3.0 * (moisture_n - MOISTURE_MIN) / (MOISTURE_MAX - MOISTURE_MIN))
     disintegration += rng.normal(0, 0.5, n_samples)
     disintegration = np.clip(disintegration, 2.0, 45.0)
     dissolution = 1.8 * disintegration + 5.0 - 3.0 * (pvpp_n - PVPP_MIN) / (PVPP_MAX - PVPP_MIN)
     dissolution += rng.normal(0, 1.0, n_samples)
     dissolution = np.clip(dissolution, 10.0, 90.0)
     y = np.column_stack([density, tensile, efrf, disintegration, dissolution])
-    return X.astype(np.float32), y.astype(np.float32)
+    return X_raw.astype(np.float32), y.astype(np.float32)
+
 class InputScaler:
     def fit(self, X):
         self.mean_ = X.mean(axis=0)
@@ -305,44 +379,229 @@ class InputScaler:
     def transform(self, X):
         return (X - self.mean_) / self.std_
 
-def apply_ood_shrinkage(pred, pop_scaled, y_train_mean):
-    density, tensile, efrf = pred[..., 0], pred[..., 1], pred[..., 2]
-    ood_z = np.abs(pop_scaled)
-    ood_raw = np.clip(ood_z - 2.0, 0, None).sum(axis=-1)
-    shrink_factor = 1.0 / (1.0 + ood_raw)
-    density = shrink_factor * density + (1 - shrink_factor) * y_train_mean[0]
-    tensile = shrink_factor * tensile + (1 - shrink_factor) * y_train_mean[1]
-    efrf = shrink_factor * efrf + (1 - shrink_factor) * y_train_mean[2]
-    return density, tensile, efrf
+# ================================================================
+# PDF REPORT GENERATION (from v32.1, adapted)
+# ================================================================
+def sanitize_text(text):
+    replacements = {'σ': 'sigma', 'µ': 'um', '≥': '>=', '≤': '<=',
+                    '✅': '[PASS]', '❌': '[FAIL]', '⚠️': '[WARNING]'}
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, speed, granule,
+                             density, tensile, efrf, disintegration, dissolution, status, timestamp,
+                             model_comparison_df=None, loss_history=None, golden_solution=None):
+    """
+    Generate a comprehensive PDF report. Adapted from v32.1 to include all relevant outputs.
+    """
+    pdf = FPDF()
+    pdf.add_page()
+
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
+    pdf.set_font("Arial", "I", 11)
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) v32.5"), ln=True, align="C")
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
+    pdf.ln(4)
+
+    pdf.set_font("Arial", "B", 12)
+    pdf.set_text_color(0, 0, 150)
+    pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True, align="C")
+    pdf.set_font("Arial", "I", 10)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 6, "Nile Valley University, Postgraduate College, Sudan", ln=True, align="C")
+    pdf.ln(5)
+
+    # Formulation Summary
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("1. Formulation Summary"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    total = api + binder + pvpp + mgst + mcc + moisture
+    components = [("API", f"{api:.1f}%", "Active Pharmaceutical Ingredient"),
+                  ("MCC", f"{mcc:.1f}%", "Filler/Binder"),
+                  ("PVPP", f"{pvpp:.1f}%", "Superdisintegrant"),
+                  ("Mg-St", f"{mgst:.2f}%", "Lubricant"),
+                  ("Binder", f"{binder:.1f}%", "Binding Agent"),
+                  ("Moisture", f"{moisture:.1f}%", "Residual Moisture"),
+                  ("TOTAL", f"{total:.1f}%", "100% Complete")]
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(40, 6, sanitize_text("Component"), 1, 0, "C")
+    pdf.cell(30, 6, sanitize_text("Value"), 1, 0, "C")
+    pdf.cell(80, 6, sanitize_text("Function"), 1, 1, "C")
+
+    pdf.set_font("Arial", "", 10)
+    for comp, val, func in components:
+        pdf.cell(40, 6, sanitize_text(comp), 1, 0, "L")
+        pdf.cell(30, 6, sanitize_text(val), 1, 0, "C")
+        pdf.cell(80, 6, sanitize_text(func), 1, 1, "L")
+    pdf.ln(4)
+
+    # Process Parameters
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("2. Process Parameters"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    params = [("Compaction Pressure", f"{pressure:.1f} MPa"),
+              ("Tableting Speed", f"{speed:.1f} rpm"),
+              ("Granule Size", f"{granule:.1f} µm")]
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(60, 6, sanitize_text("Parameter"), 1, 0, "C")
+    pdf.cell(60, 6, sanitize_text("Value"), 1, 1, "C")
+
+    pdf.set_font("Arial", "", 10)
+    for p, v in params:
+        pdf.cell(60, 6, sanitize_text(p), 1, 0, "L")
+        pdf.cell(60, 6, sanitize_text(v), 1, 1, "C")
+    pdf.ln(4)
+
+    # Prediction Results
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    results = [("Density", f"{density:.3f}", "-"),
+               ("Tensile Strength", f"{tensile:.3f} MPa", f">= 1.90 MPa"),
+               ("EFRF", f"{efrf:.4f}", f"< 0.40"),
+               ("Disintegration Time", f"{disintegration:.1f} min", "≤ 15.0 min"),
+               ("Dissolution", f"{dissolution:.1f} %", "≥ 80.0 %")]
+
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(45, 6, sanitize_text("Metric"), 1, 0, "C")
+    pdf.cell(35, 6, sanitize_text("Value"), 1, 0, "C")
+    pdf.cell(45, 6, sanitize_text("Threshold"), 1, 1, "C")
+
+    pdf.set_font("Arial", "", 10)
+    for r in results:
+        pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
+        pdf.cell(35, 6, sanitize_text(r[1]), 1, 0, "C")
+        pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
+    pdf.ln(4)
+
+    # Overall Status
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
+    pdf.set_font("Arial", "B", 14)
+    if status == "PASS":
+        pdf.set_text_color(0, 128, 0)
+        pdf.cell(0, 8, sanitize_text("PASS - Formulation Satisfies All Constraints"), ln=True, align="C")
+    else:
+        pdf.set_text_color(255, 0, 0)
+        pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    # Model Comparison (if available)
+    if model_comparison_df is not None and not model_comparison_df.empty:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("5. Model Performance Comparison"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(40, 6, sanitize_text("Model"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("R²"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0, "C")
+        pdf.cell(30, 6, sanitize_text("MAE"), 1, 0, "C")
+        pdf.cell(40, 6, sanitize_text("Physics"), 1, 1, "C")
+
+        pdf.set_font("Arial", "", 10)
+        for _, row in model_comparison_df.iterrows():
+            pdf.cell(40, 6, sanitize_text(str(row['Model'])), 1, 0, "L")
+            pdf.cell(30, 6, f"{row['R²']:.4f}", 1, 0, "C")
+            pdf.cell(30, 6, f"{row['RMSE']:.4f}", 1, 0, "C")
+            pdf.cell(30, 6, f"{row['MAE']:.4f}", 1, 0, "C")
+            pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
+        pdf.ln(4)
+
+    # Training Loss Summary
+    if loss_history and len(loss_history['train']) > 0:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
+        pdf.ln(4)
+
+    # Recommendations
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("7. Recommendations"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 10)
+
+    if status == "PASS":
+        recs = ["1. Proceed with experimental validation.",
+                "2. Confirm tensile strength with physical testing.",
+                "3. Evaluate disintegration time and dissolution.",
+                "4. Assess stability under ICH conditions.",
+                "5. Scale-up for process optimization."]
+    else:
+        recs = ["1. Reduce API or adjust binder concentration.",
+                "2. Optimize Mg-St level.",
+                "3. Increase compaction pressure.",
+                "4. Reduce punch speed.",
+                "5. Re-run with adjusted parameters."]
+
+    for rec in recs:
+        pdf.cell(0, 6, sanitize_text(rec), ln=True)
+    pdf.ln(4)
+
+    # Contact Info
+    pdf.set_font("Arial", "B", 13)
+    pdf.set_fill_color(230, 230, 230)
+    pdf.cell(0, 8, sanitize_text("8. Contact Information"), ln=True, fill=True)
+    pdf.set_font("Arial", "", 11)
+    pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
+    pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
+    pdf.cell(0, 7, "Phone: +249-123-638-638", ln=True)
+    pdf.cell(0, 7, "Nile Valley University, Postgraduate College, Sudan", ln=True)
+
+    pdf.ln(3)
+    pdf.set_y(270)
+    pdf.set_font("Arial", "I", 8)
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v32.5", ln=True, align="C")
+
+    pdf_bytes = pdf.output(dest="S")
+    if isinstance(pdf_bytes, bytearray):
+        return bytes(pdf_bytes)
+    elif isinstance(pdf_bytes, bytes):
+        return pdf_bytes
+    else:
+        return str(pdf_bytes).encode('latin1')
 
 # ================================================================
-# PHYSICS FUNCTIONS FOR PINN LOSS
+# CHECKPOINT PATHS & ATOMIC SAVE (from v32.4)
 # ================================================================
-def calculate_heckel_density_torch(pressure, binder):
-    """Heckel‑style density from pressure and binder (torch tensors)."""
-    porosity0 = 0.45 - 0.001 * (pressure - PRESSURE_MIN) - 0.01 * (binder - 3.0)
-    return torch.clamp(1.0 - porosity0 * torch.exp(-0.01 * (pressure - PRESSURE_MIN)), 0.55, 0.95)
+CHECKPOINT_SYNTHETIC = os.path.join(tempfile.gettempdir(), 'co_hybai_v32_5_synthetic.pt')
 
-# ================================================================
-# CHECKPOINT PATHS & ATOMIC SAVE
-# ================================================================
-CHECKPOINT_SYNTHETIC = os.path.join(tempfile.gettempdir(), 'co_hybai_synthetic_v10_physics.pt')
 def _data_fingerprint(df):
     try:
         row_hash = int(pd.util.hash_pandas_object(df, index=False).sum())
     except Exception:
         row_hash = hash(tuple(df.shape))
     return f"{len(df)}_{row_hash & 0xFFFFFFFF}"
+
 @st.cache_resource(show_spinner=False)
 def train_model(use_real=False, _real_df=None, data_fingerprint=None):
     if use_real and _real_df is not None and data_fingerprint:
-        checkpoint_path = os.path.join(tempfile.gettempdir(), f'co_hybai_real_{data_fingerprint}.pt')
+        checkpoint_path = os.path.join(tempfile.gettempdir(), f'co_hybai_v32_5_real_{data_fingerprint}.pt')
     else:
         checkpoint_path = CHECKPOINT_SYNTHETIC
+
     if os.path.exists(checkpoint_path):
         try:
             ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            model = HybridTabletModel(input_dim=8, hidden_dim=256)
+            model = HybridTabletModel(input_dim=13, hidden_dim=256)
             model.load_state_dict(ckpt['model_state'])
             model.eval()
             scaler = ckpt['scaler']
@@ -359,24 +618,26 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
 
     if use_real and _real_df is not None:
         required_cols = ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture', 'Pressure', 'Speed',
-                          'Density', 'Tensile', 'EFRF', 'Disintegration', 'Dissolution']
+                         'Density', 'Tensile', 'EFRF', 'Disintegration', 'Dissolution']
         missing = [c for c in required_cols if c not in _real_df.columns]
         if missing:
             raise ValueError(f"Missing columns: {missing}")
-        X = _real_df[required_cols[:8]].values.astype(np.float32)
+        X_raw = _real_df[required_cols[:8]].values.astype(np.float32)
         y = _real_df[required_cols[8:]].values.astype(np.float32)
         data_source = 'real'
         st.session_state.data_source = 'real'
     else:
-        X, y = generate_synthetic_data()
+        X_raw, y = generate_synthetic_data()
         data_source = 'synthetic'
         st.session_state.data_source = 'synthetic'
 
-    scaler = InputScaler().fit(X)
-    X_scaled = scaler.transform(X)
+    # Add interaction features
+    X_aug = add_interaction_features(X_raw)
+    scaler = InputScaler().fit(X_aug)
+    X_scaled = scaler.transform(X_aug)
 
-    n_val = int(0.2 * len(X))
-    perm = np.random.default_rng(0).permutation(len(X))
+    n_val = int(0.2 * len(X_scaled))
+    perm = np.random.default_rng(0).permutation(len(X_scaled))
     val_idx, train_idx = perm[:n_val], perm[n_val:]
 
     X_train_t = torch.tensor(X_scaled[train_idx], dtype=torch.float32)
@@ -384,11 +645,12 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
     X_val_t = torch.tensor(X_scaled[val_idx], dtype=torch.float32)
     y_val_t = torch.tensor(y[val_idx], dtype=torch.float32)
 
-    # Physics variables (raw unscaled values for Heckel)
-    pressure_train_t = torch.tensor(X[train_idx, 6], dtype=torch.float32)
-    binder_train_t = torch.tensor(X[train_idx, 1], dtype=torch.float32)
+    # Physics variables (raw unscaled)
+    pressure_train_t = torch.tensor(X_raw[train_idx, 6], dtype=torch.float32)
+    binder_train_t = torch.tensor(X_raw[train_idx, 1], dtype=torch.float32)
+    mcc_train_t = torch.tensor(X_raw[train_idx, 4], dtype=torch.float32)
 
-    model = HybridTabletModel(input_dim=8, hidden_dim=256)
+    model = HybridTabletModel(input_dim=13, hidden_dim=256)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=30, factor=0.5)
 
@@ -399,30 +661,78 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
         return (((pred - true) ** 2) / target_var).mean()
 
     loss_fn = weighted_mse
-    PHYSICS_LOSS_WEIGHT = 0.2   # balanced weight for physics residual
-
-    history = {'loss': [], 'r2': [], 'rmse': [], 'data_source': data_source}
+    history = {'loss': [], 'r2': [], 'rmse': [], 'data_source': data_source,
+               'data': [], 'physics': []}  # for PDF report
     best_val_loss = np.inf
     best_state = None
     patience, patience_counter = 60, 0
+
+    # Define physics functions
+    def calculate_heckel_density_torch(pressure, binder):
+        porosity0 = 0.45 - 0.001 * (pressure - PRESSURE_MIN) - 0.01 * (binder - 3.0)
+        return torch.clamp(1.0 - porosity0 * torch.exp(-0.01 * (pressure - PRESSURE_MIN)), 0.55, 0.95)
 
     for epoch in range(TRAINING_EPOCHS):
         model.train()
         optimizer.zero_grad()
         pred = model(X_train_t)
-        # Data loss (weighted MSE)
-        data_loss = loss_fn(pred, y_train_t)
-        # Physics loss: Heckel density residual
-        physical_density = calculate_heckel_density_torch(pressure_train_t, binder_train_t)
-        physics_loss = torch.mean((pred[:, 0] - physical_density) ** 2) * PHYSICS_LOSS_WEIGHT
-        # EFRF constraint penalty (soft) – encourage predictions below 0.40
-        efrf_penalty = torch.mean(torch.relu(pred[:, 2] - 0.40)) * PHYSICS_LOSS_WEIGHT
-        total_loss = data_loss + physics_loss + efrf_penalty
 
+        # Data loss
+        data_loss = loss_fn(pred, y_train_t)
+
+        # ---- Physics losses ----
+        # 1. Heckel residual
+        physical_density = calculate_heckel_density_torch(pressure_train_t, binder_train_t)
+        heckel_loss = torch.mean((pred[:, 0] - physical_density) ** 2)
+
+        # 2. EFRF constraint (explicit)
+        efrf_constraint = torch.mean(torch.relu(pred[:, 2] - 0.40) ** 2)
+
+        # 3. Monotonicity: ∂D/∂P > 0 (compute gradient every 10 epochs)
+        if epoch % 10 == 0:
+            X_train_t.requires_grad_(True)
+            pred_grad = model(X_train_t)
+            density_grad = pred_grad[:, 0]
+            grad_density = torch.autograd.grad(
+                outputs=density_grad,
+                inputs=X_train_t,
+                grad_outputs=torch.ones_like(density_grad),
+                create_graph=True, retain_graph=True
+            )[0]
+            grad_pressure = grad_density[:, 5]  # index of pressure in augmented input
+            monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
+            X_train_t.requires_grad_(False)
+        else:
+            monotonic_loss = torch.tensor(0.0, device=X_train_t.device)
+
+        # 4. Boundary constraints
+        mask_low = (pressure_train_t < 120).float()
+        mask_high = (pressure_train_t > 230).float()
+        boundary_loss = (
+            torch.mean(mask_low * torch.relu(0.5 - pred[:, 0]) ** 2) +
+            torch.mean(mask_high * torch.relu(pred[:, 0] - 0.98) ** 2)
+        )
+
+        # 5. MCC penalty
+        mcc_penalty = torch.mean(torch.relu(mcc_train_t - MCC_MAX) ** 2)
+
+        # 6. Density penalty
+        density_penalty = torch.mean(torch.relu(pred[:, 0] - 0.99) ** 2)
+
+        # Combine physics losses
+        physics_loss = (heckel_loss * PHYSICS_LOSS_WEIGHT +
+                        efrf_constraint * EFRF_CONSTRAINT_WEIGHT +
+                        monotonic_loss * MONOTONICITY_WEIGHT +
+                        boundary_loss * BOUNDARY_WEIGHT +
+                        mcc_penalty * MCC_PENALTY_WEIGHT +
+                        density_penalty * DENSITY_PENALTY_WEIGHT)
+
+        total_loss = data_loss + physics_loss
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
+        # Validation
         model.eval()
         with torch.no_grad():
             val_pred = model(X_val_t)
@@ -438,6 +748,9 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
             history['loss'].append(val_loss)
             history['r2'].append(val_r2)
             history['rmse'].append(val_rmse)
+            # Log data and physics loss components (for PDF)
+            history['data'].append(data_loss.item())
+            history['physics'].append(physics_loss.item())
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -467,9 +780,8 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
     history['n_train'] = len(train_idx)
     history['n_val'] = len(val_idx)
     history['y_train_mean'] = y_train_t.mean(dim=0).numpy().tolist()
-    history['n_samples'] = len(X)
+    history['n_samples'] = len(X_scaled)
 
-    # ATOMIC SAVE
     tmp_path = checkpoint_path + f'.tmp{os.getpid()}'
     torch.save({
         'model_state': model.state_dict(),
@@ -480,8 +792,9 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
     os.replace(tmp_path, checkpoint_path)
 
     return model, scaler, history
+
 # ================================================================
-# NSGA-II OPTIMIZER
+# NSGA-II OPTIMIZER (from v32.4)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, pop_size=50, generations=80, y_train_mean=None):
@@ -509,7 +822,9 @@ class NSGAIIOptimizer:
         return balanced
 
     def evaluate(self, pop):
-        pop_scaled = self.scaler.transform(pop)
+        # Add interaction features
+        pop_aug = np.array([add_interaction_features(row.reshape(1, -1))[0] for row in pop])
+        pop_scaled = self.scaler.transform(pop_aug)
         with torch.no_grad():
             pred = self.model.predict(pop_scaled)
         api = pop[:, 0]
@@ -572,11 +887,13 @@ class NSGAIIOptimizer:
                     pos = front_pos[sorted_front[i]]
                     dist[pos] += (obj[sorted_front[i + 1]][m] - obj[sorted_front[i - 1]][m]) / (max_val - min_val)
         return dist
+
     GENE_BOUNDS = [
         (API_MIN, API_MAX), (BINDER_MIN, BINDER_MAX), (PVPP_MIN, PVPP_MAX),
         (MGST_MIN, MGST_MAX), (MCC_MIN, MCC_MAX), (MOISTURE_MIN, MOISTURE_MAX),
         (PRESSURE_MIN, PRESSURE_MAX), (SPEED_MIN, SPEED_MAX),
     ]
+
     def optimize(self, n_vars):
         pop = np.random.rand(self.pop_size, n_vars)
         pop[:, 0] = pop[:, 0] * 18 + 80
@@ -662,8 +979,9 @@ class NSGAIIOptimizer:
                     'pareto_objectives': obj[pareto_indices]
                 })
             yield pop, obj, history, gen
+
 # ================================================================
-# ANALYSIS FUNCTIONS (Sensitivity & 3D/Radar)
+# ANALYSIS FUNCTIONS (from v32.3)
 # ================================================================
 def perform_sensitivity_analysis(model, scaler, ref_solution):
     try:
@@ -672,14 +990,16 @@ def perform_sensitivity_analysis(model, scaler, ref_solution):
         bounds_min = np.array([API_MIN, BINDER_MIN, PVPP_MIN, MGST_MIN, MCC_MIN, MOISTURE_MIN, PRESSURE_MIN, SPEED_MIN])
         bounds_max = np.array([API_MAX, BINDER_MAX, PVPP_MAX, MGST_MAX, MCC_MAX, MOISTURE_MAX, PRESSURE_MAX, SPEED_MAX])
         X_local = np.clip(X_local, bounds_min, bounds_max)
-        X_scaled = scaler.transform(X_local)
-        y_local = model.predict(X_scaled)[:, 0]  # Using Density as target
+        X_local_aug = np.array([add_interaction_features(row.reshape(1, -1))[0] for row in X_local])
+        X_scaled = scaler.transform(X_local_aug)
+        y_local = model.predict(X_scaled)[:, 0]  # Density
         rf.fit(X_scaled, y_local)
         perm_importance = permutation_importance(rf, X_scaled, y_local)
         feature_names = ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture', 'Pressure', 'Speed']
         return dict(zip(feature_names, perm_importance.importances_mean))
     except Exception:
         return None
+
 def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
     fig = go.Figure(data=[go.Scatter3d(x=pop[:, 0], y=obj[:, 2], z=-obj[:, 1], mode='markers',
                                         marker=dict(size=4, color=pop[:, 0], colorscale='Viridis'), name='Pareto')])
@@ -691,20 +1011,23 @@ def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
                                     mode='markers', marker=dict(size=12, color='blue', symbol='circle'), name='Tested Formulation'))
     fig.update_layout(scene=dict(xaxis_title='API (%)', yaxis_title='EFRF', zaxis_title='Tensile (MPa)'), height=450)
     st.plotly_chart(fig, use_container_width=True)
+
 # ================================================================
-# RESULT FUNCTIONS (Feasible Filtering)
+# RESULT FUNCTIONS (from v32.4, with uncertainty)
 # ================================================================
 def get_model_and_scaler():
     real_df = st.session_state.get('user_data')
     use_real = real_df is not None and len(real_df) > 0
     fingerprint = _data_fingerprint(real_df) if use_real else None
     return train_model(use_real=use_real, _real_df=real_df, data_fingerprint=fingerprint)
+
 def run_real_training_and_get_history():
     model, scaler, history = get_model_and_scaler()
     st.session_state['_trained_model'] = model
     st.session_state['_trained_scaler'] = scaler
     st.session_state['_trained_history'] = history
     return history
+
 def run_real_optimization(progress_callback=None):
     model = st.session_state.get('_trained_model')
     scaler = st.session_state.get('_trained_scaler')
@@ -728,7 +1051,7 @@ def run_real_optimization(progress_callback=None):
     pareto_idx = fronts[0]
     pareto_pop = final_pop[pareto_idx]
     pareto_obj = final_obj[pareto_idx]
-    preds = model.predict(scaler.transform(pareto_pop))
+    preds = model.predict(scaler.transform(np.array([add_interaction_features(row.reshape(1, -1))[0] for row in pareto_pop])))
     solutions = []
     for i, (row, pred) in enumerate(zip(pareto_pop, preds)):
         api, binder, pvpp, mgst, mcc, moisture = row[:6]
@@ -748,7 +1071,8 @@ def run_real_optimization(progress_callback=None):
     if not solutions:
         return [], None, [], None, None
     return solutions, solutions[0], gen_history, pareto_pop, pareto_obj
-def get_current_formulation_results():
+
+def get_current_formulation_results(return_std=False):
     model = st.session_state.get('_trained_model')
     scaler = st.session_state.get('_trained_scaler')
     history = st.session_state.get('_trained_history')
@@ -763,23 +1087,35 @@ def get_current_formulation_results():
     )
     row = np.array([[n['api'], n['binder'], n['pvpp'], n['mgst'], n['mcc'], n['moisture'],
                       st.session_state.pressure, st.session_state.speed]], dtype=np.float32)
-    row_scaled = scaler.transform(row)
-    pred = model.predict(row_scaled)[0]
+    row_aug = add_interaction_features(row)
+    row_scaled = scaler.transform(row_aug)
     y_train_mean = history.get('y_train_mean', [0.75, 4.5, 0.5, 20.0, 45.0])
+    if return_std:
+        mean, std = model.predict_with_uncertainty(torch.FloatTensor(row_scaled), n_samples=20)
+        pred = mean[0]
+        std = std[0]
+    else:
+        with torch.no_grad():
+            pred = model.predict(row_scaled)[0]
+        std = None
     density, tensile, efrf = apply_ood_shrinkage(pred[np.newaxis, :], row_scaled, y_train_mean)
-    return {
+    result = {
         'api': float(n['api']),
         'density': float(density[0]), 'tensile': float(tensile[0]), 'efrf': float(efrf[0]),
         'disintegration': float(pred[3]), 'dissolution': float(pred[4])
     }
+    if return_std and std is not None:
+        result['std'] = std.tolist()  # [std_density, std_tensile, std_efrf, std_disint, std_dissol]
+    return result
+
 # ================================================================
-# UI RENDER FUNCTIONS
+# UI RENDER FUNCTIONS (from v32.3, with uncertainty & PDF)
 # ================================================================
 def render_sidebar():
     with st.sidebar:
         st.markdown("## 🧬 Hybrid AI Framework")
         st.markdown("---")
-        st.markdown(f"**Version:** v32.4-Integrated")
+        st.markdown(f"**Version:** v32.5-Ultimate")
         st.markdown(f"**Institution:** Nile Valley University")
         st.markdown(f"**Department:** Pharmaceutical Engineering")
         st.markdown("---")
@@ -825,7 +1161,7 @@ def render_sidebar():
         if st.button("🔄 Force Retrain", use_container_width=True):
             import glob
             checkpoints_to_remove = [CHECKPOINT_SYNTHETIC] + glob.glob(
-                os.path.join(tempfile.gettempdir(), 'co_hybai_real_*.pt'))
+                os.path.join(tempfile.gettempdir(), 'co_hybai_v32_5_real_*.pt'))
             for checkpoint in checkpoints_to_remove:
                 if os.path.exists(checkpoint):
                     try:
@@ -842,14 +1178,12 @@ def render_sidebar():
         st.markdown("---")
 
         with st.expander("📊 Optimization Objectives", expanded=True):
-            st.markdown("1. **Maximize API%** (penalised low‑API)")
-            st.markdown("2. **Maximize Tensile** (penalised low‑tensile)")
-            st.markdown("3. **Maximize Density** → Better tablet quality")
-            st.markdown("4. **Minimize EFRF** → Better powder flow")
+            st.markdown("1. **Maximize Density**")
+            st.markdown("2. **Maximize Tensile**")
+            st.markdown("3. **Minimize EFRF**")
+            st.markdown("4. **Penalise low API & low Tensile**")
         with st.expander("🏆 Golden Solution Preference", expanded=True):
-            st.caption("How to weigh the Pareto-optimal solutions when picking one "
-                       "'Golden Solution' — higher API weight favors potency, higher "
-                       "Quality weight favors overall tablet performance.")
+            st.caption("Weigh API vs overall Quality when picking the 'Golden Solution'.")
             w_api = st.slider("Weight for API", 0.0, 1.0, 0.4, key="w_api_slider")
             w_quality = st.slider("Weight for Quality", 0.0, 1.0, 0.6, key="w_quality_slider")
             w_sum = w_api + w_quality
@@ -866,9 +1200,9 @@ def render_sidebar():
             st.markdown(f"**Population:** {POPULATION_SIZE}")
             st.markdown(f"**Generations:** {NSGA_GENERATIONS}")
             st.markdown(f"**Training Epochs:** {TRAINING_EPOCHS}")
-            st.markdown("**Algorithm:** NSGA‑II (3 obj + API & Tensile penalties)")
-            st.markdown("**Model:** Physics‑Informed Neural Network (Heckel + EFRF constraint)")
-            st.markdown("**Constraint:** Mass Balance (Σ ≈ 100%, iteratively projected)")
+            st.markdown("**Algorithm:** NSGA‑II (3 obj + penalties)")
+            st.markdown("**Model:** Physics‑Informed NN (v32.5 ultimate)")
+            st.markdown("**Constraint:** Mass Balance (iterative)")
             st.markdown(f"**Runtime:** {st.session_state.runtime}s" if st.session_state.runtime else "**Runtime:** Pending")
         st.markdown("---")
 
@@ -888,6 +1222,7 @@ def render_sidebar():
         st.markdown("---")
         st.caption("© 2024 Nile Valley University · Sudan")
     return w_api, w_quality
+
 def render_binder_grade_comparison():
     st.markdown("---")
     st.markdown("## 🔬 Binder Grade Impact")
@@ -914,6 +1249,7 @@ def render_binder_grade_comparison():
         paper_bgcolor='rgba(0,0,0,0)'
     )
     st.plotly_chart(fig, use_container_width=True)
+
 def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
     raw_total = api + binder + pvpp + mgst + mcc + moisture
     summary = get_formulation_summary(api, binder, pvpp, mgst, mcc, moisture)
@@ -961,6 +1297,7 @@ def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
         cols = st.columns(6)
         for col, name in zip(cols, ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture']):
             col.metric(name, f"{summary[name]:.1f}%")
+
 def render_input_panel():
     st.markdown("## 🧪 Formulation Parameters")
     st.info("⚠️ Components will be automatically normalized to sum to 100%.")
@@ -1009,6 +1346,7 @@ def render_input_panel():
         st.session_state.dwell_time = st.slider("**Dwell Time (ms)**", DWELL_TIME_MIN, DWELL_TIME_MAX, st.session_state.dwell_time, step=1.0)
         st.session_state.friction = st.slider("**Friction Coefficient**", FRICTION_MIN, FRICTION_MAX, st.session_state.friction, step=0.01)
         st.session_state.decompression_time = st.slider("**Decompression Time (ms)**", DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, step=2.0)
+
 def target_status(value, threshold, mode='min', comfortable=None):
     if mode == 'min':
         if value < threshold:
@@ -1022,11 +1360,12 @@ def target_status(value, threshold, mode='min', comfortable=None):
         if comfortable is not None and value <= comfortable:
             return 'good', "Excellent"
         return 'warn', "Passes (near limit)"
+
 def _metric_with_badge(label, value_str, level, text):
     st.metric(label, value_str)
     st.markdown(status_badge_html(level, text), unsafe_allow_html=True)
 
-def render_results_summary(results):
+def render_results_summary(results, std=None):
     st.markdown("---")
     st.markdown("## 📊 Optimization Results")
     api_val = st.session_state.api
@@ -1036,15 +1375,31 @@ def render_results_summary(results):
         st.metric("**API%**", f"{api_val:.1f}%")
         st.markdown(status_badge_html('good', "🎯 Target: maximize"), unsafe_allow_html=True)
         d_level, d_text = target_status(results['density'], 0.80, mode='min', comfortable=0.85)
-        _metric_with_badge("**Density**", f"{results['density']:.3f}", d_level, d_text)
+        if std is not None:
+            delta = f"± {std[0]:.3f}"
+        else:
+            delta = ""
+        _metric_with_badge("**Density**", f"{results['density']:.3f} {delta}", d_level, d_text)
     with col2:
         t_level, t_text = target_status(results['tensile'], 1.5, mode='min', comfortable=3.0)
-        _metric_with_badge("**Tensile Strength**", f"{results['tensile']:.2f} MPa", t_level, t_text)
+        if std is not None:
+            delta = f"± {std[1]:.3f}"
+        else:
+            delta = ""
+        _metric_with_badge("**Tensile Strength**", f"{results['tensile']:.2f} MPa {delta}", t_level, t_text)
         e_level, e_text = target_status(results['efrf'], 0.40, mode='max', comfortable=0.30)
-        _metric_with_badge("**EFRF**", f"{results['efrf']:.3f}", e_level, e_text)
+        if std is not None:
+            delta = f"± {std[2]:.3f}"
+        else:
+            delta = ""
+        _metric_with_badge("**EFRF**", f"{results['efrf']:.3f} {delta}", e_level, e_text)
     with col3:
         di_level, di_text = target_status(results['disintegration'], 15.0, mode='max', comfortable=10.0)
-        _metric_with_badge("**Disintegration Time**", f"{results['disintegration']:.1f} min", di_level, di_text)
+        if std is not None:
+            delta = f"± {std[3]:.1f}"
+        else:
+            delta = ""
+        _metric_with_badge("**Disintegration Time**", f"{results['disintegration']:.1f} min {delta}", di_level, di_text)
         q_level = 'good' if quality['overall'] > 60 else 'bad'
         q_text = "Good" if quality['overall'] > 60 else "Needs Improvement"
         _metric_with_badge("**Overall Quality Score**", f"{quality['overall']:.1f}%", q_level, q_text)
@@ -1058,6 +1413,7 @@ def render_results_summary(results):
         | EFRF      | {quality['efrf_score']:.1f}% | {quality['weights']['efrf']:.0%} | {quality['efrf_score']*quality['weights']['efrf']:.1f}% |
         | **Total** | - | - | **{quality['overall']:.1f}%** |
         """)
+
 def render_training_progress():
     st.markdown("---")
     st.markdown("## 🔍 Training Progress")
@@ -1097,6 +1453,7 @@ def render_training_progress():
                 f"Trained on {history.get('n_train', '?')} samples, validated on "
                 f"{history.get('n_val', '?')} held-out samples."
             )
+
 def render_pareto_evolution():
     st.markdown("---")
     st.markdown("## 🌐 Pareto Front Evolution: API% vs EFRF")
@@ -1118,10 +1475,12 @@ def render_pareto_evolution():
     sort_idx = np.argsort(api_feas)
     api_sorted = api_feas[sort_idx]
     efrf_sorted = efrf_feas[sort_idx]
+    # Use real values (no cumulative minimum, as the front is already non‑dominated)
     if len(efrf_sorted) > 0:
-        cummin_efrf = np.minimum.accumulate(efrf_sorted)
+        cummin_efrf = efrf_sorted  # keep original
     else:
         cummin_efrf = efrf_sorted
+
     fig = go.Figure()
     fig.add_hrect(
         y0=0, y1=0.40, x0=API_MIN, x1=API_MAX,
@@ -1144,14 +1503,9 @@ def render_pareto_evolution():
     ))
     if len(api_sorted) > 0 and api_sorted[-1] < API_MAX:
         last_api = api_sorted[-1]
-        fig.add_shape(
-            type="rect",
+        fig.add_vrect(
             x0=last_api, x1=API_MAX,
-            y0=0, y1=1,
-            xref='x', yref='paper',
-            fillcolor='rgba(150,150,150,0.10)',
-            line_width=0,
-            layer='below'
+            fillcolor='rgba(150,150,150,0.10)', line_width=0, layer='below'
         )
         fig.add_annotation(
             x=(last_api + API_MAX) / 2, y=0.40, yshift=14, showarrow=False,
@@ -1209,6 +1563,7 @@ def render_pareto_evolution():
             "while still being non-dominated in the full 3-objective search — see the "
             "3D Pareto front below for the complete picture."
         )
+
 def render_golden_solution(golden):
     if not golden:
         return
@@ -1249,9 +1604,7 @@ def render_golden_solution(golden):
                    f"but {details} — worth reviewing before committing to this formulation.")
     else:
         st.success("✅ This formulation maximises API% and Tensile while preserving excellent tablet quality!")
-# ================================================================
-# DYNAMIC RADAR IMPLEMENTATION
-# ================================================================
+
 def render_side_by_side_comparison(golden, all_solutions):
     if not golden or not all_solutions:
         return
@@ -1273,7 +1626,6 @@ def render_side_by_side_comparison(golden, all_solutions):
         options=[s['Solution'] for s in all_solutions],
         default=[all_solutions[0]['Solution'], all_solutions[1]['Solution']] if len(all_solutions) > 1 else [all_solutions[0]['Solution']]
     )
-
     if selected:
         categories = ["API%", "Density", "Tensile (MPa)", "EFRF (inverted)", "Quality Score"]
         fig = go.Figure()
@@ -1301,6 +1653,7 @@ def render_side_by_side_comparison(golden, all_solutions):
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Please select at least one solution to display the radar chart.")
+
 def render_best_solutions():
     solutions = st.session_state.get('best_solutions')
     golden = st.session_state.get('golden_solution')
@@ -1359,6 +1712,7 @@ def render_best_solutions():
                             file_name=f"report_{timestamp}.json",
                             mime="application/json",
                             use_container_width=True)
+
 def render_optimization_summary():
     st.markdown("---")
     st.markdown("## 📈 Optimization Summary")
@@ -1413,7 +1767,7 @@ def render_optimization_summary():
     with col4:
         st.markdown("### Status Indicators")
         st.success("✅ Algorithm: NSGA‑II + dual penalty")
-        st.success("✅ Model: Physics‑Informed Neural Network")
+        st.success("✅ Model: Physics‑Informed NN (v32.5 ultimate)")
         st.success("✅ Constraint: Mass Balance")
         st.info("📊 Pareto Front: Optimized")
         st.info("🎯 Objectives: 3 + API/Tensile bias")
@@ -1421,6 +1775,7 @@ def render_optimization_summary():
             st.info("📂 Data: Real (user uploaded)")
         else:
             st.info("🔄 Data: Synthetic (fallback)")
+
 # ================================================================
 # MAIN ORCHESTRATION
 # ================================================================
@@ -1460,6 +1815,7 @@ def _render_full_results():
                 st.warning("Could not compute local sensitivity.")
         else:
             st.warning("Model or Golden Solution missing for Sensitivity Analysis.")
+
 def _run_optimization(w_api, w_quality):
     start_time = time.time()
     valid, msg = validate_formulation(
@@ -1484,7 +1840,9 @@ def _run_optimization(w_api, w_quality):
     nsga_elapsed = round(time.time() - nsga_start, 1)
     opt_progress.empty()
 
-    st.session_state.results = get_current_formulation_results()
+    # Get current formulation results with uncertainty
+    results_with_std = get_current_formulation_results(return_std=True)
+    st.session_state.results = results_with_std  # store dict with std
     st.session_state.pareto_history = gen_history
     st.session_state.runtime = round(time.time() - start_time, 1)
     st.session_state.train_time = train_elapsed
@@ -1505,7 +1863,7 @@ def _run_optimization(w_api, w_quality):
     pareto_obj = pareto_obj[feasible_mask]
     weights = np.array([w_api, w_quality])
     best_score = -np.inf
-    golden = solutions[0]  # fallback
+    golden = solutions[0]
     for sol in solutions:
         score = (sol['API (%)'] / 100 * weights[0]) + ((sol['Quality Score'] / 100) * weights[1])
         if score > best_score:
@@ -1544,9 +1902,10 @@ def main():
             if not valid:
                 st.error(f"❌ {msg}")
             else:
-                with st.spinner("Running model prediction..."):
-                    quick_results = get_current_formulation_results()
-                render_results_summary(quick_results)
+                with st.spinner("Running model prediction with uncertainty..."):
+                    quick_results = get_current_formulation_results(return_std=True)
+                    std = quick_results.pop('std', None)
+                render_results_summary(quick_results, std=std)
                 st.info("This is a direct model prediction for the formulation currently set on the "
                         "sliders — it does not run the NSGA-II search. Switch to the "
                         "**🚀 Optimize & Results** tab and click **Run Hybrid Optimization** "
@@ -1558,7 +1917,9 @@ def main():
         if run_button:
             _run_optimization(w_api, w_quality)
         elif st.session_state.optimization_complete and st.session_state.results:
-            render_results_summary(st.session_state.results)
+            results = st.session_state.results
+            std = results.get('std', None)
+            render_results_summary(results, std=std)
             _render_full_results()
         else:
             st.info("👆 Set your formulation on the **🧪 Formulate** tab, then click "
@@ -1571,9 +1932,10 @@ def main():
                 st.markdown("**📊 API & Tensile Penalties**")
             with col2:
                 st.markdown("**⚖️ Mass Balance Projected**")
-                st.markdown("**🔬 PINN Constraints**")
+                st.markdown("**🔬 Enhanced Physics Loss**")
             with col3:
                 st.markdown("**📈 Pareto Front**")
                 st.markdown("**🏆 Golden Solution**")
+
 if __name__ == "__main__":
     main()
