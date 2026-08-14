@@ -45,13 +45,21 @@ st.set_page_config(
 def inject_custom_css():
     st.markdown("""
     <style>
-    /* Elegant gradient background */
+    /* Global background and font */
     body {
         background: linear-gradient(135deg, #f8f9fa 0%, #eceef2 50%, #ffffff 100%);
         font-family: 'Inter', 'Segoe UI', sans-serif;
+        color: #333333;
     }
 
-    /* Card styling for metrics */
+    /* Headings */
+    h1, h2, h3 {
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+        letter-spacing: -0.01em;
+        color: #2d3748;
+    }
+
+    /* Metric cards */
     div[data-testid="stMetric"] {
         background: #ffffff;
         border: 1px solid #e0e0e0;
@@ -62,13 +70,6 @@ def inject_custom_css():
     }
     div[data-testid="stMetric"]:hover {
         transform: scale(1.02);
-    }
-
-    /* Headings */
-    h1, h2, h3 {
-        font-family: 'Inter', 'Segoe UI', sans-serif;
-        letter-spacing: -0.01em;
-        color: #333333;
     }
 
     /* Buttons */
@@ -89,11 +90,12 @@ def inject_custom_css():
         border-radius: 10px;
     }
 
-    /* Expander styling */
+    /* Expander panels */
     div[data-testid="stExpander"] {
         border: 1px solid #eceef2;
         border-radius: 10px;
         box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        background: #ffffff;
     }
 
     /* Status badges */
@@ -131,6 +133,17 @@ def inject_custom_css():
     .live-check.ok   { background: #ebfbee; color: #2f9e44; border-color: #d3f9d8; }
     .live-check.warn { background: #fff4e6; color: #e8590c; border-color: #ffe8cc; }
     .live-check.bad  { background: #fff5f5; color: #e03131; border-color: #ffc9c9; }
+
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background: #f8f9fa;
+        border-right: 1px solid #eceef2;
+    }
+    section[data-testid="stSidebar"] .stButton button {
+        border-radius: 8px;
+        background: linear-gradient(135deg, #667eea, #764ba2) !important;
+        color: white !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1300,8 +1313,8 @@ def render_dashboard():
                 x=api_vals, y=efrf_vals,
                 mode='markers+lines',
                 name='Pareto Solutions',
-                marker=dict(size=6, color='#667eea'),
-                line=dict(color='#764ba2', width=2)
+                marker=dict(size=6, color='#2f9e44'),
+                line=dict(color='#2f9e44', width=2)
             ))
             if golden:
                 fig_pareto.add_trace(go.Scatter(
@@ -1645,18 +1658,29 @@ def render_training_progress():
     data_source = history.get('data_source', 'unknown')
     st.info(f"📊 Model trained on: **{data_source.upper()}** data ({history.get('n_samples', '?')} samples)")
 
-    # Loss curve with unified colors
+    # Loss curve with unified colours (Training Loss & Physics Loss)
     fig_loss = go.Figure()
+    # Training Loss (validation loss)
     fig_loss.add_trace(go.Scatter(
         y=history['loss'],
-        mode='lines',
-        name='Validation Loss',
-        line=dict(color='#667eea', width=2)
+        mode='lines+markers',
+        name='Training Loss',
+        line=dict(color='#667eea', width=2),
+        marker=dict(color='#667eea', size=4)
     ))
+    # Physics Loss (if available)
+    if 'physics' in history and len(history['physics']) > 1:
+        fig_loss.add_trace(go.Scatter(
+            y=history['physics'],
+            mode='lines+markers',
+            name='Physics Loss',
+            line=dict(color='#764ba2', width=2, dash='dash'),
+            marker=dict(color='#764ba2', size=4)
+        ))
     fig_loss.update_layout(
-        title='Loss Evolution (real validation loss, recorded every 20 epochs)',
-        xaxis_title='Recorded checkpoint',
-        yaxis_title='MSE Loss',
+        title='Loss Evolution (recorded every 20 epochs)',
+        xaxis_title='Epochs',
+        yaxis_title='Loss Value',
         height=250,
         plot_bgcolor='#f8f9fa',
         paper_bgcolor='#ffffff',
@@ -1668,19 +1692,21 @@ def render_training_progress():
     fig_metrics = go.Figure()
     fig_metrics.add_trace(go.Scatter(
         y=history['r2'],
-        mode='lines',
+        mode='lines+markers',
         name='R² Score',
-        line=dict(color='#2f9e44', width=2)
+        line=dict(color='#2f9e44', width=2),
+        marker=dict(color='#2f9e44', size=4)
     ))
     fig_metrics.add_trace(go.Scatter(
         y=history['rmse'],
-        mode='lines',
+        mode='lines+markers',
         name='RMSE',
-        line=dict(color='#e8590c', width=2)
+        line=dict(color='#e8590c', width=2),
+        marker=dict(color='#e8590c', size=4)
     ))
     fig_metrics.update_layout(
-        title='Model Performance (real validation metrics)',
-        xaxis_title='Recorded checkpoint',
+        title='Model Performance (validation metrics)',
+        xaxis_title='Epochs',
         yaxis_title='Metric Value',
         height=250,
         plot_bgcolor='#f8f9fa',
@@ -1963,7 +1989,7 @@ def _render_full_results():
                               golden['MgSt (%)'], golden['MCC (%)'], golden['Moisture (%)'], 200.0, 20.0])
                 )
                 if sens_data:
-                    # Use a Plotly bar chart with unified colors
+                    # Unified sensitivity bar chart
                     fig_sens = go.Figure()
                     features = list(sens_data.keys())
                     values = list(sens_data.values())
