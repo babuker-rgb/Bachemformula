@@ -2,11 +2,12 @@
 # Hybrid AI · Multi-Objective Tablet Optimization (v32.6)
 # Nile Valley University · Sudan · Pharmaceutical Engineering
 #
-# v32.6 features:
+# v32.6 fixes:
 #   - Corrected interaction features & monotonicity gradient
 #   - PDF report in dedicated "Report" tab
 #   - Dashboard inside expander (loss curve restored)
 #   - 2D Pareto slider removed (kept 3D Pareto only)
+#   - Fixed StreamlitDuplicateElementId by controlling dashboard render
 #   - Unified UI/Chart palette: #667eea (primary), #764ba2 (secondary),
 #     #2f9e44 (success), #e8590c (warning), #e03131 (danger), #FFD700 (golden)
 #   - Modern CSS with gradients, shadows, hover effects
@@ -212,7 +213,8 @@ def initialize_session_state():
         'runtime': 0, 'train_time': None, 'nsga_time': None, 'pareto_history': None,
         'user_data': None, 'data_source': 'synthetic',
         'force_retrain': False,
-        '_trained_model': None, '_trained_scaler': None, '_trained_history': None
+        '_trained_model': None, '_trained_scaler': None, '_trained_history': None,
+        'dashboard_rendered': False  # NEW: flag to prevent duplicate dashboard
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -1227,7 +1229,7 @@ def get_current_formulation_results(return_std=False):
     return result
 
 # ================================================================
-# DASHBOARD (inside an expander, loss curve restored)
+# DASHBOARD (inside an expander, loss curve restored, with unique keys)
 # ================================================================
 def render_dashboard():
     with st.expander("📊 Dashboard Panel (Training & Optimization Status)", expanded=False):
@@ -1303,7 +1305,7 @@ def render_dashboard():
             else:
                 st.caption("Run optimisation to enable downloads.")
 
-        # ---- Loss Curve (restored) ----
+        # ---- Loss Curve (restored, with unique key) ----
         if history and len(history.get('loss', [])) > 1:
             st.subheader("📉 Loss Curve")
             fig_loss = go.Figure()
@@ -1333,9 +1335,10 @@ def render_dashboard():
                 paper_bgcolor='#ffffff',
                 font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
             )
-            st.plotly_chart(fig_loss, use_container_width=True)
+            # Use a unique key to avoid duplicate ID
+            st.plotly_chart(fig_loss, use_container_width=True, key="dashboard_loss_curve")
 
-        # ---- Small Pareto plot (unified palette) ----
+        # ---- Small Pareto plot (unified palette, unique key) ----
         if solutions:
             st.subheader("🌐 Pareto Front (API vs EFRF)")
             api_vals = [s['API (%)'] for s in solutions]
@@ -1364,7 +1367,7 @@ def render_dashboard():
                 font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333"),
                 height=250
             )
-            st.plotly_chart(fig_pareto, use_container_width=True)
+            st.plotly_chart(fig_pareto, use_container_width=True, key="dashboard_pareto")
 
         st.caption(f"⏱️ Total runtime: {runtime:.1f}s")
 
@@ -1690,7 +1693,7 @@ def render_training_progress():
     data_source = history.get('data_source', 'unknown')
     st.info(f"📊 Model trained on: **{data_source.upper()}** data ({history.get('n_samples', '?')} samples)")
 
-    # Loss curve (Training Loss + Physics Loss)
+    # Loss curve (Training Loss + Physics Loss) – unique key to avoid conflict
     fig_loss = go.Figure()
     fig_loss.add_trace(go.Scatter(
         y=history['loss'],
@@ -1716,7 +1719,7 @@ def render_training_progress():
         paper_bgcolor='#ffffff',
         font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
     )
-    st.plotly_chart(fig_loss, use_container_width=True)
+    st.plotly_chart(fig_loss, use_container_width=True, key="training_loss_curve")
 
     # R² and RMSE with unified colors
     fig_metrics = go.Figure()
@@ -1743,7 +1746,7 @@ def render_training_progress():
         paper_bgcolor='#ffffff',
         font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
     )
-    st.plotly_chart(fig_metrics, use_container_width=True)
+    st.plotly_chart(fig_metrics, use_container_width=True, key="training_metrics")
     st.success(f"✅ Training complete! Final validation R² (macro-average across 5 outputs) = "
                f"{history['r2'][-1]:.3f}, RMSE = {history['rmse'][-1]:.3f}")
     per_output = history.get('per_output_r2')
@@ -2048,6 +2051,9 @@ def _render_full_results():
             st.warning("Model, Scaler, or Golden Solution missing for Sensitivity Analysis.")
 
 def _run_optimization(w_api, w_quality):
+    # Reset dashboard rendered flag
+    st.session_state.dashboard_rendered = False
+
     start_time = time.time()
     valid, msg = validate_formulation(
         st.session_state.api, st.session_state.binder,
@@ -2111,6 +2117,7 @@ def _run_optimization(w_api, w_quality):
 
     # Show dashboard immediately (first run)
     render_dashboard()
+    st.session_state.dashboard_rendered = True
     _render_full_results()
 
 def main():
@@ -2152,8 +2159,10 @@ def main():
         if run_button:
             _run_optimization(w_api, w_quality)
         elif st.session_state.optimization_complete and st.session_state.results:
-            # Show dashboard (if not already shown by _run_optimization)
-            render_dashboard()
+            # Only render dashboard if not already rendered in this session
+            if not st.session_state.get('dashboard_rendered', False):
+                render_dashboard()
+                st.session_state.dashboard_rendered = True
             results = st.session_state.results
             std = results.get('std', None)
             render_results_summary(results, std=std)
