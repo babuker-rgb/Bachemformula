@@ -9,7 +9,8 @@
 #     enhanced loss, MC-Dropout uncertainty, OOD shrinkage,
 #     monotonicity/boundary/MCC/density penalties, explicit EFRF loss)
 #   - PDF report generation from v32.1 (full professional report)
-#   - Dashboard panel for real‑time training/optimisation status
+#   - Dashboard panel inside an expander (closed by default)
+#   - Loss curve & Pareto front included in PDF report
 #
 # Also includes:
 #   - Real data support (CSV upload) with fingerprint-based caching
@@ -22,6 +23,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import plotly.graph_objects as go
+import plotly.io as pio
 import time
 import warnings
 import json
@@ -381,7 +383,7 @@ class InputScaler:
         return (X - self.mean_) / self.std_
 
 # ================================================================
-# PDF REPORT GENERATION (from v32.1, adapted)
+# PDF REPORT GENERATION (updated with dashboard plots)
 # ================================================================
 def sanitize_text(text):
     replacements = {'σ': 'sigma', 'µ': 'um', '≥': '>=', '≤': '<=',
@@ -392,9 +394,11 @@ def sanitize_text(text):
 
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, speed, granule,
                              density, tensile, efrf, disintegration, dissolution, status, timestamp,
-                             model_comparison_df=None, loss_history=None, golden_solution=None):
+                             model_comparison_df=None, loss_history=None,
+                             pareto_solutions=None, golden_solution=None):
     """
-    Generate a comprehensive PDF report. Adapted from v32.1 to include all relevant outputs.
+    Generate a comprehensive PDF report.
+    Now includes loss curve and Pareto front plots if data is available.
     """
     pdf = FPDF()
     pdf.add_page()
@@ -523,16 +527,85 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
         pdf.ln(4)
 
-    # Training Loss Summary
-    if loss_history and len(loss_history['train']) > 0:
+    # Training Loss Summary (text)
+    if loss_history and len(loss_history.get('train', [])) > 0:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
         pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
         pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
-        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
-        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
+        if 'data' in loss_history and len(loss_history['data']) > 0:
+            pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
+        if 'physics' in loss_history and len(loss_history['physics']) > 0:
+            pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
         pdf.ln(4)
+
+    # ----- NEW: Loss Curve Plot (if history has enough points) -----
+    if loss_history and len(loss_history.get('loss', [])) > 1:
+        try:
+            import plotly.io as pio
+            fig_loss = go.Figure()
+            fig_loss.add_trace(go.Scatter(
+                y=loss_history['loss'], mode='lines+markers',
+                name='Training Loss', line=dict(color='blue', width=2)
+            ))
+            if 'physics' in loss_history and len(loss_history['physics']) > 1:
+                fig_loss.add_trace(go.Scatter(
+                    y=loss_history['physics'], mode='lines+markers',
+                    name='Physics Loss', line=dict(color='red', width=2, dash='dash')
+                ))
+            fig_loss.update_layout(
+                title="Loss Evolution",
+                xaxis_title="Epochs (recorded every 20)",
+                yaxis_title="Loss",
+                template="plotly_white",
+                height=300
+            )
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                fig_loss.write_image(tmp.name, width=600, height=300)
+                tmp_path = tmp.name
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 13)
+            pdf.cell(0, 10, "6b. Training Loss Curve", ln=True)
+            pdf.image(tmp_path, x=10, y=None, w=190)
+            os.unlink(tmp_path)
+        except Exception as e:
+            # Fallback: just skip the image if export fails
+            pass
+
+    # ----- NEW: Pareto Front Plot (if solutions exist) -----
+    if pareto_solutions and len(pareto_solutions) > 0:
+        try:
+            api_vals = [s['API (%)'] for s in pareto_solutions]
+            efrf_vals = [s['EFRF'] for s in pareto_solutions]
+            fig_pareto = go.Figure()
+            fig_pareto.add_trace(go.Scatter(
+                x=api_vals, y=efrf_vals, mode='markers+lines',
+                name='Pareto Front', marker=dict(size=8, color='green')
+            ))
+            if golden_solution:
+                fig_pareto.add_trace(go.Scatter(
+                    x=[golden_solution['API (%)']], y=[golden_solution['EFRF']],
+                    mode='markers', name='Golden Solution',
+                    marker=dict(size=12, color='gold', symbol='star')
+                ))
+            fig_pareto.update_layout(
+                title="Pareto Front (API vs EFRF)",
+                xaxis_title="API (%)",
+                yaxis_title="EFRF",
+                template="plotly_white",
+                height=300
+            )
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                fig_pareto.write_image(tmp.name, width=600, height=300)
+                tmp_path = tmp.name
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 13)
+            pdf.cell(0, 10, "6c. Pareto Front (API vs EFRF)", ln=True)
+            pdf.image(tmp_path, x=10, y=None, w=190)
+            os.unlink(tmp_path)
+        except Exception as e:
+            pass
 
     # Recommendations
     pdf.set_font("Arial", "B", 13)
@@ -1110,94 +1183,94 @@ def get_current_formulation_results(return_std=False):
     return result
 
 # ================================================================
-# DASHBOARD (new in v32.5)
+# DASHBOARD PANEL (inside an expander, closed by default)
 # ================================================================
 def render_dashboard():
-    """Dashboard panel showing training and optimisation status with quick download links."""
-    st.markdown("## 📊 Dashboard")
-    
-    # Retrieve data from session_state
-    history = st.session_state.get('_trained_history', {})
-    runtime = st.session_state.get('runtime', 0)
-    solutions = st.session_state.get('best_solutions', [])
-    golden = st.session_state.get('golden_solution', None)
-    gen_history = st.session_state.get('pareto_history', [])
-    opt_complete = st.session_state.get('optimization_complete', False)
-    
-    col1, col2, col3 = st.columns(3)
-    
-    # ---------- Column 1: Training Status ----------
-    with col1:
-        st.markdown("### 🧠 Training Status")
-        if history and len(history.get('loss', [])) > 0:
-            total_loss = history['loss'][-1] if history['loss'] else None
-            data_loss = history.get('data', [None])[-1] if history.get('data') else None
-            physics_loss = history.get('physics', [None])[-1] if history.get('physics') else None
-            
-            st.metric("Total Loss", f"{total_loss:.6f}" if total_loss else "—")
-            st.metric("Data Loss", f"{data_loss:.6f}" if data_loss else "—")
-            st.metric("Physics Loss", f"{physics_loss:.6f}" if physics_loss else "—")
-            
-            n_samples = history.get('n_samples', '?')
-            st.caption(f"Trained on {n_samples} samples")
-        else:
-            st.info("No training data yet. Run optimisation first.")
-    
-    # ---------- Column 2: Optimisation Status ----------
-    with col2:
-        st.markdown("### ⚙️ Optimisation Status")
-        if gen_history:
-            generations = len(gen_history)
-            pareto_count = len(solutions) if solutions else 0
-            st.metric("Generations", f"{generations} / {NSGA_GENERATIONS}")
-            st.metric("Pareto Solutions", f"{pareto_count}")
-            if golden:
-                st.metric("Best API%", f"{golden['API (%)']:.2f}%")
-                st.metric("Best EFRF", f"{golden['EFRF']:.4f}")
+    """Dashboard panel inside a collapsible expander."""
+    with st.expander("📊 Dashboard Panel (Training & Optimization Status)", expanded=False):
+        history = st.session_state.get('_trained_history', {})
+        golden = st.session_state.get('golden_solution', None)
+        gen_history = st.session_state.get('pareto_history', [])
+        solutions = st.session_state.get('best_solutions', [])
+        runtime = st.session_state.get('runtime', 0)
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        # Training Loss
+        with col1:
+            if history and len(history.get('loss', [])) > 0:
+                st.metric("Training Loss", f"{history['loss'][-1]:.4f}")
             else:
-                st.caption("No golden solution yet.")
-        else:
-            st.info("Optimisation not yet run.")
-        
-        if runtime:
-            st.metric("⏱️ Runtime", f"{runtime:.1f}s")
-    
-    # ---------- Column 3: Quick Reports ----------
-    with col3:
-        st.markdown("### 📥 Quick Reports")
-        if opt_complete and solutions:
-            # CSV
-            df = pd.DataFrame(solutions)
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="📊 CSV Report",
-                data=csv,
-                file_name=f"results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                key="dashboard_csv"
-            )
-            # JSON
+                st.metric("Training Loss", "N/A")
+
+        # Physics Loss
+        with col2:
+            if history and 'physics' in history and len(history['physics']) > 0:
+                st.metric("Physics Loss", f"{history['physics'][-1]:.4f}")
+            else:
+                st.metric("Physics Loss", "N/A")
+
+        # Generations
+        with col3:
+            gen_count = len(gen_history) if gen_history else 0
+            st.metric("NSGA-II Generations", f"{gen_count} / {NSGA_GENERATIONS}")
+
+        # Golden Solution
+        with col4:
             if golden:
-                json_report = {
-                    'timestamp': datetime.now().isoformat(),
-                    'golden_solution': golden,
-                    'all_solutions': solutions,
-                    'data_source': st.session_state.data_source
-                }
-                st.download_button(
-                    label="📄 JSON Report",
-                    data=json.dumps(json_report, indent=2, default=str),
-                    file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                    mime="application/json",
-                    use_container_width=True,
-                    key="dashboard_json"
-                )
-            # PDF – we cannot easily generate PDF here without all parameters,
-            # so we point the user to the full PDF in the Report tab.
-            st.info("📄 Full PDF report available in the **Report** tab above.")
-        else:
-            st.caption("Run optimisation to enable downloads.")
+                api_val = golden.get('API (%)', 0)
+                efrf_val = golden.get('EFRF', 0)
+                st.metric("🏆 Golden Solution", f"API {api_val:.1f}% | EFRF {efrf_val:.3f}")
+            else:
+                st.metric("🏆 Golden Solution", "N/A")
+
+        # Loss Curve
+        if history and len(history.get('loss', [])) > 1:
+            st.subheader("📉 Loss Curve")
+            fig_loss = go.Figure()
+            fig_loss.add_trace(go.Scatter(
+                y=history['loss'], mode='lines+markers', name='Training Loss',
+                line=dict(color='blue', width=2)
+            ))
+            if 'physics' in history and len(history['physics']) > 1:
+                fig_loss.add_trace(go.Scatter(
+                    y=history['physics'], mode='lines+markers', name='Physics Loss',
+                    line=dict(color='red', width=2, dash='dash')
+                ))
+            fig_loss.update_layout(
+                xaxis_title="Epochs (recorded every 20)",
+                yaxis_title="Loss",
+                template="plotly_white",
+                height=250
+            )
+            st.plotly_chart(fig_loss, use_container_width=True)
+
+        # Pareto front (small)
+        if solutions:
+            st.subheader("🌐 Pareto Front (API vs EFRF)")
+            api_vals = [s['API (%)'] for s in solutions]
+            efrf_vals = [s['EFRF'] for s in solutions]
+            fig_pareto = go.Figure()
+            fig_pareto.add_trace(go.Scatter(
+                x=api_vals, y=efrf_vals, mode='markers+lines',
+                name='Pareto Solutions', marker=dict(size=6, color='green')
+            ))
+            if golden:
+                fig_pareto.add_trace(go.Scatter(
+                    x=[golden['API (%)']], y=[golden['EFRF']],
+                    mode='markers', name='Golden Solution',
+                    marker=dict(size=12, color='gold', symbol='star')
+                ))
+            fig_pareto.update_layout(
+                xaxis_title="API (%)",
+                yaxis_title="EFRF",
+                template="plotly_white",
+                height=250
+            )
+            st.plotly_chart(fig_pareto, use_container_width=True)
+
+        # Runtime
+        st.caption(f"⏱️ Total runtime: {runtime:.1f}s")
 
 # ================================================================
 # UI RENDER FUNCTIONS (from v32.3, with uncertainty & PDF)
@@ -2008,7 +2081,7 @@ def main():
         if run_button:
             _run_optimization(w_api, w_quality)
         elif st.session_state.optimization_complete and st.session_state.results:
-            # Display dashboard first
+            # Display dashboard first (inside expander)
             render_dashboard()
             # Then results
             results = st.session_state.results
