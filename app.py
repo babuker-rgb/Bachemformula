@@ -8,7 +8,6 @@
 #   - PDF report is accessible via a dedicated "Report" tab
 #   - Dashboard appears on first optimisation run
 #   - PDF includes disintegration/dissolution and Golden Solution details
-#   - Fixed KeyError in PDF generation (loss_history['train'] -> loss_history['loss'])
 #
 # All other features from v32.5 are retained.
 # ================================================================
@@ -387,7 +386,7 @@ class InputScaler:
         return (X - self.mean_) / self.std_
 
 # ================================================================
-# PDF REPORT GENERATION (UPDATED - fixed KeyError)
+# PDF REPORT GENERATION (UPDATED)
 # ================================================================
 def sanitize_text(text):
     replacements = {'σ': 'sigma', 'µ': 'um', '≥': '>=', '≤': '<=',
@@ -400,7 +399,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
                              density, tensile, efrf, disintegration, dissolution, status, timestamp,
                              model_comparison_df=None, loss_history=None, golden_solution=None):
     """
-    Generate a comprehensive PDF report. Now uses correct loss_history keys.
+    Generate a comprehensive PDF report. Now includes disintegration/dissolution and Golden Solution.
     """
     pdf = FPDF()
     pdf.add_page()
@@ -547,17 +546,15 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
         pdf.ln(4)
 
-    # Training Loss Summary (using correct keys)
-    if loss_history and len(loss_history.get('loss', [])) > 0:
+    # Training Loss Summary
+    if loss_history and len(loss_history['train']) > 0:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
         pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
-        pdf.cell(0, 6, f"Final Validation Loss: {loss_history['loss'][-1]:.6f}", ln=True)
-        if 'data' in loss_history and len(loss_history['data']) > 0:
-            pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
-        if 'physics' in loss_history and len(loss_history['physics']) > 0:
-            pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
+        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
         pdf.ln(4)
 
     # Recommendations
@@ -2107,6 +2104,7 @@ def main():
             results = st.session_state.results
             golden = st.session_state.get('golden_solution')
             history = st.session_state.get('_trained_history')
+            solutions = st.session_state.get('best_solutions')
             status = "PASS" if (results['tensile'] >= 1.90 and results['efrf'] < 0.40) else "FAIL"
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
@@ -2128,7 +2126,7 @@ def main():
                 dissolution=results['dissolution'],
                 status=status,
                 timestamp=timestamp,
-                model_comparison_df=None,
+                model_comparison_df=None,  # can be added later
                 loss_history=history,
                 golden_solution=golden
             )
