@@ -1,20 +1,15 @@
 # ================================================================
-# Hybrid AI · Multi-Objective Tablet Optimization (v32.5 Ultimate)
+# Hybrid AI · Multi-Objective Tablet Optimization (v32.6)
 # Nile Valley University · Sudan · Pharmaceutical Engineering
 #
-# v32.5 combines:
-#   - UI/UX of v32.3 (custom CSS, tabs, live mass balance, binder grades,
-#     Pareto slider, 3D/radar, sensitivity)
-#   - Physics & technical depth of v32.4 (interaction features,
-#     enhanced loss, MC-Dropout uncertainty, OOD shrinkage,
-#     monotonicity/boundary/MCC/density penalties, explicit EFRF loss)
-#   - PDF report generation from v32.1 (full professional report)
-#   - Dashboard panel inside an expander (closed by default)
+# v32.6 fixes:
+#   - Interaction features now use correct column indices
+#   - Monotonicity gradient uses Pressure (index 6) instead of Moisture
+#   - PDF report is accessible via a dedicated "Report" tab
+#   - Dashboard appears on first optimisation run
+#   - PDF includes disintegration/dissolution and Golden Solution details
 #
-# Also includes:
-#   - Real data support (CSV upload) with fingerprint-based caching
-#   - Multi-objective NSGA-II (Density, Tensile, EFRF) with API/Tensile penalties
-#   - Comprehensive reporting (PDF, CSV, JSON)
+# All other features from v32.5 are retained.
 # ================================================================
 import streamlit as st
 import numpy as np
@@ -38,7 +33,7 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIG
 # ================================================================
 st.set_page_config(
-    page_title="Hybrid AI · Tablet Optimization v32.5",
+    page_title="Hybrid AI · Tablet Optimization v32.6",
     page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -100,7 +95,7 @@ def render_header():
     st.markdown("""
     <div class="app-header">
         <h1>🧬 Hybrid AI · Multi-Objective Tablet Optimization</h1>
-        <p>Nile Valley University · Sudan · Pharmaceutical Engineering · v32.5 (Ultimate)</p>
+        <p>Nile Valley University · Sudan · Pharmaceutical Engineering · v32.6 (Corrected)</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -212,18 +207,23 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                 'weights': weights}
 
 # ================================================================
-# FEATURE ENGINEERING (interaction features from v32.1)
+# FEATURE ENGINEERING (CORRECTED)
 # ================================================================
 def add_interaction_features(X_raw):
     """
-    X_raw shape: (n, 8) columns: [API, MCC, PVPP, MgSt, Binder, Pressure, Speed, Granule]
+    X_raw shape: (n, 8) columns:
+    [API, Binder, PVPP, MgSt, MCC, Moisture, Pressure, Speed]
     Returns augmented array with additional interaction terms.
     """
-    pressure = X_raw[:, 5:6]
-    binder = X_raw[:, 4:5]
-    api = X_raw[:, 0:1]
-    speed = X_raw[:, 6:7]
-    mcc = X_raw[:, 1:2]
+    # Extract correct columns
+    api = X_raw[:, 0:1]          # index 0
+    binder = X_raw[:, 1:2]       # index 1
+    pvpp = X_raw[:, 2:3]         # index 2 (not used directly)
+    mgst = X_raw[:, 3:4]         # index 3 (not used directly)
+    mcc = X_raw[:, 4:5]          # index 4
+    moisture = X_raw[:, 5:6]     # index 5 (not used directly)
+    pressure = X_raw[:, 6:7]     # index 6
+    speed = X_raw[:, 7:8]        # index 7
 
     pressure_speed = np.clip(pressure / (speed + 0.1), 0, 1000)
     api_mcc = np.clip(api / (mcc + 0.1), 0, 1000)
@@ -232,8 +232,12 @@ def add_interaction_features(X_raw):
     pressure_api = pressure * api
 
     return np.concatenate([
-        X_raw, pressure_binder, pressure_api,
-        pressure_speed, api_mcc, binder_speed
+        X_raw,
+        pressure_binder,
+        pressure_api,
+        pressure_speed,
+        api_mcc,
+        binder_speed
     ], axis=1)
 
 # ================================================================
@@ -346,6 +350,7 @@ def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
     pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
     speed = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
     granule = rng.uniform(GRANULE_MIN, GRANULE_MAX, n_samples)
+    # Column order: API, Binder, PVPP, MgSt, MCC, Moisture, Pressure, Speed
     X_raw = np.column_stack([api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n, pressure, speed])
     # Generate targets using physical relationships
     porosity0 = 0.45 - 0.001 * (pressure - PRESSURE_MIN) - 0.01 * (binder_n - 3.0)
@@ -381,7 +386,7 @@ class InputScaler:
         return (X - self.mean_) / self.std_
 
 # ================================================================
-# PDF REPORT GENERATION (from v32.1, adapted)
+# PDF REPORT GENERATION (UPDATED)
 # ================================================================
 def sanitize_text(text):
     replacements = {'σ': 'sigma', 'µ': 'um', '≥': '>=', '≤': '<=',
@@ -394,7 +399,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
                              density, tensile, efrf, disintegration, dissolution, status, timestamp,
                              model_comparison_df=None, loss_history=None, golden_solution=None):
     """
-    Generate a comprehensive PDF report. Adapted from v32.1 to include all relevant outputs.
+    Generate a comprehensive PDF report. Now includes disintegration/dissolution and Golden Solution.
     """
     pdf = FPDF()
     pdf.add_page()
@@ -402,7 +407,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
-    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) v32.5"), ln=True, align="C")
+    pdf.cell(0, 6, sanitize_text("Hybrid AI Framework (PINN + NSGA-II) v32.6"), ln=True, align="C")
     pdf.set_font("Arial", "", 10)
     pdf.cell(0, 6, f"Date: {timestamp}", ln=True, align="C")
     pdf.ln(4)
@@ -423,10 +428,10 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
 
     total = api + binder + pvpp + mgst + mcc + moisture
     components = [("API", f"{api:.1f}%", "Active Pharmaceutical Ingredient"),
-                  ("MCC", f"{mcc:.1f}%", "Filler/Binder"),
+                  ("Binder", f"{binder:.1f}%", "Binding Agent"),
                   ("PVPP", f"{pvpp:.1f}%", "Superdisintegrant"),
                   ("Mg-St", f"{mgst:.2f}%", "Lubricant"),
-                  ("Binder", f"{binder:.1f}%", "Binding Agent"),
+                  ("MCC", f"{mcc:.1f}%", "Filler/Binder"),
                   ("Moisture", f"{moisture:.1f}%", "Residual Moisture"),
                   ("TOTAL", f"{total:.1f}%", "100% Complete")]
 
@@ -462,7 +467,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
         pdf.cell(60, 6, sanitize_text(v), 1, 1, "C")
     pdf.ln(4)
 
-    # Prediction Results
+    # Prediction Results (now includes disintegration and dissolution)
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
@@ -499,6 +504,24 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
         pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
+
+    # Golden Solution (if provided)
+    if golden_solution:
+        pdf.set_font("Arial", "B", 13)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(0, 8, sanitize_text("4a. Golden Solution (Balanced Trade-off)"), ln=True, fill=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"API: {golden_solution.get('API (%)', 0):.1f}%", ln=True)
+        pdf.cell(0, 6, f"Binder: {golden_solution.get('Binder (%)', 0):.1f}%", ln=True)
+        pdf.cell(0, 6, f"PVPP: {golden_solution.get('PVPP (%)', 0):.1f}%", ln=True)
+        pdf.cell(0, 6, f"MgSt: {golden_solution.get('MgSt (%)', 0):.2f}%", ln=True)
+        pdf.cell(0, 6, f"MCC: {golden_solution.get('MCC (%)', 0):.1f}%", ln=True)
+        pdf.cell(0, 6, f"Moisture: {golden_solution.get('Moisture (%)', 0):.1f}%", ln=True)
+        pdf.cell(0, 6, f"Density: {golden_solution.get('Density', 0):.3f}", ln=True)
+        pdf.cell(0, 6, f"Tensile: {golden_solution.get('Tensile (MPa)', 0):.2f} MPa", ln=True)
+        pdf.cell(0, 6, f"EFRF: {golden_solution.get('EFRF', 0):.4f}", ln=True)
+        pdf.cell(0, 6, f"Quality Score: {golden_solution.get('Quality Score', 0):.1f}%", ln=True)
+        pdf.ln(4)
 
     # Model Comparison (if available)
     if model_comparison_df is not None and not model_comparison_df.empty:
@@ -570,7 +593,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
     pdf.ln(3)
     pdf.set_y(270)
     pdf.set_font("Arial", "I", 8)
-    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v32.5", ln=True, align="C")
+    pdf.cell(0, 6, "Generated by: Hybrid AI Framework v32.6", ln=True, align="C")
 
     pdf_bytes = pdf.output(dest="S")
     if isinstance(pdf_bytes, bytearray):
@@ -583,7 +606,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
 # ================================================================
 # CHECKPOINT PATHS & ATOMIC SAVE (from v32.4)
 # ================================================================
-CHECKPOINT_SYNTHETIC = os.path.join(tempfile.gettempdir(), 'co_hybai_v32_5_synthetic.pt')
+CHECKPOINT_SYNTHETIC = os.path.join(tempfile.gettempdir(), 'co_hybai_v32_6_synthetic.pt')
 
 def _data_fingerprint(df):
     try:
@@ -595,7 +618,7 @@ def _data_fingerprint(df):
 @st.cache_resource(show_spinner=False)
 def train_model(use_real=False, _real_df=None, data_fingerprint=None):
     if use_real and _real_df is not None and data_fingerprint:
-        checkpoint_path = os.path.join(tempfile.gettempdir(), f'co_hybai_v32_5_real_{data_fingerprint}.pt')
+        checkpoint_path = os.path.join(tempfile.gettempdir(), f'co_hybai_v32_6_real_{data_fingerprint}.pt')
     else:
         checkpoint_path = CHECKPOINT_SYNTHETIC
 
@@ -700,7 +723,8 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
                 grad_outputs=torch.ones_like(density_grad),
                 create_graph=True, retain_graph=True
             )[0]
-            grad_pressure = grad_density[:, 5]  # index of pressure in augmented input
+            # Correct index: pressure is column 6 in the augmented input (first 8 are original)
+            grad_pressure = grad_density[:, 6]
             monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
             X_train_t.requires_grad_(False)
         else:
@@ -1122,7 +1146,6 @@ def render_dashboard():
         runtime = st.session_state.get('runtime', 0)
         opt_complete = st.session_state.get('optimization_complete', False)
 
-        # ----- Three columns: Training, Optimisation, Quick Reports -----
         col1, col2, col3 = st.columns(3)
 
         with col1:
@@ -1184,11 +1207,11 @@ def render_dashboard():
                         use_container_width=True,
                         key="dashboard_json"
                     )
-                st.info("📄 Full PDF report available in the **Report** tab above.")
+                st.info("📄 Full PDF report is available in the **Report** tab above.")
             else:
                 st.caption("Run optimisation to enable downloads.")
 
-        # ----- Loss Curve (below the columns) -----
+        # Loss Curve
         if history and len(history.get('loss', [])) > 1:
             st.subheader("📉 Loss Curve")
             fig_loss = go.Figure()
@@ -1209,7 +1232,7 @@ def render_dashboard():
             )
             st.plotly_chart(fig_loss, use_container_width=True)
 
-        # ----- Pareto Front (small) -----
+        # Pareto Front (small)
         if solutions:
             st.subheader("🌐 Pareto Front (API vs EFRF)")
             api_vals = [s['API (%)'] for s in solutions]
@@ -1242,7 +1265,7 @@ def render_sidebar():
     with st.sidebar:
         st.markdown("## 🧬 Hybrid AI Framework")
         st.markdown("---")
-        st.markdown(f"**Version:** v32.5-Ultimate")
+        st.markdown(f"**Version:** v32.6-Corrected")
         st.markdown(f"**Institution:** Nile Valley University")
         st.markdown(f"**Department:** Pharmaceutical Engineering")
         st.markdown("---")
@@ -1288,7 +1311,7 @@ def render_sidebar():
         if st.button("🔄 Force Retrain", use_container_width=True):
             import glob
             checkpoints_to_remove = [CHECKPOINT_SYNTHETIC] + glob.glob(
-                os.path.join(tempfile.gettempdir(), 'co_hybai_v32_5_real_*.pt'))
+                os.path.join(tempfile.gettempdir(), 'co_hybai_v32_6_real_*.pt'))
             for checkpoint in checkpoints_to_remove:
                 if os.path.exists(checkpoint):
                     try:
@@ -1329,7 +1352,7 @@ def render_sidebar():
             st.markdown(f"**Training Epochs:** {TRAINING_EPOCHS}")
             st.markdown(f"**Synthetic samples:** {N_SAMPLES}")
             st.markdown("**Algorithm:** NSGA‑II (3 obj + penalties)")
-            st.markdown("**Model:** Physics‑Informed NN (v32.5 ultimate)")
+            st.markdown("**Model:** Physics‑Informed NN (v32.6 corrected)")
             st.markdown("**Constraint:** Mass Balance (iterative)")
             st.markdown(f"**Runtime:** {st.session_state.runtime}s" if st.session_state.runtime else "**Runtime:** Pending")
         st.markdown("---")
@@ -1603,9 +1626,9 @@ def render_pareto_evolution():
     sort_idx = np.argsort(api_feas)
     api_sorted = api_feas[sort_idx]
     efrf_sorted = efrf_feas[sort_idx]
-    # Use real values (no cumulative minimum, as the front is already non‑dominated)
+    # Use real values (no cumulative minimum)
     if len(efrf_sorted) > 0:
-        cummin_efrf = efrf_sorted  # keep original
+        cummin_efrf = efrf_sorted
     else:
         cummin_efrf = efrf_sorted
 
@@ -1895,7 +1918,7 @@ def render_optimization_summary():
     with col4:
         st.markdown("### Status Indicators")
         st.success("✅ Algorithm: NSGA‑II + dual penalty")
-        st.success("✅ Model: Physics‑Informed NN (v32.5 ultimate)")
+        st.success("✅ Model: Physics‑Informed NN (v32.6 corrected)")
         st.success("✅ Constraint: Mass Balance")
         st.info("📊 Pareto Front: Optimized")
         st.info("🎯 Objectives: 3 + API/Tensile bias")
@@ -2008,6 +2031,9 @@ def _run_optimization(w_api, w_quality):
     st.caption(f"Optimization took {st.session_state.runtime:.2f} seconds "
                f"(train/load: {train_elapsed}s, NSGA-II: {nsga_elapsed}s).")
     st.balloons()
+
+    # Show dashboard immediately (first run)
+    render_dashboard()
     _render_full_results()
 
 def main():
@@ -2016,7 +2042,8 @@ def main():
     render_header()
     st.write("")
 
-    tab_formulate, tab_optimize = st.tabs(["🧪 Formulate", "🚀 Optimize & Results"])
+    # Three tabs: Formulate, Optimize & Results, Report
+    tab_formulate, tab_optimize, tab_report = st.tabs(["🧪 Formulate", "🚀 Optimize & Results", "📄 Report"])
 
     with tab_formulate:
         render_input_panel()
@@ -2048,9 +2075,8 @@ def main():
         if run_button:
             _run_optimization(w_api, w_quality)
         elif st.session_state.optimization_complete and st.session_state.results:
-            # Display dashboard first (inside expander)
+            # Show dashboard (if not already shown by _run_optimization)
             render_dashboard()
-            # Then results
             results = st.session_state.results
             std = results.get('std', None)
             render_results_summary(results, std=std)
@@ -2070,6 +2096,51 @@ def main():
             with col3:
                 st.markdown("**📈 Pareto Front**")
                 st.markdown("**🏆 Golden Solution**")
+
+    with tab_report:
+        st.markdown("## 📄 Full PDF Report")
+        if st.session_state.optimization_complete and st.session_state.results:
+            # Gather data for PDF
+            results = st.session_state.results
+            golden = st.session_state.get('golden_solution')
+            history = st.session_state.get('_trained_history')
+            solutions = st.session_state.get('best_solutions')
+            status = "PASS" if (results['tensile'] >= 1.90 and results['efrf'] < 0.40) else "FAIL"
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            # Generate PDF
+            pdf_data = generate_full_pdf_report(
+                api=st.session_state.api,
+                mcc=st.session_state.mcc,
+                pvpp=st.session_state.pvpp,
+                mgst=st.session_state.mgst,
+                binder=st.session_state.binder,
+                moisture=st.session_state.moisture,
+                pressure=st.session_state.pressure,
+                speed=st.session_state.speed,
+                granule=st.session_state.granule,
+                density=results['density'],
+                tensile=results['tensile'],
+                efrf=results['efrf'],
+                disintegration=results['disintegration'],
+                dissolution=results['dissolution'],
+                status=status,
+                timestamp=timestamp,
+                model_comparison_df=None,  # can be added later
+                loss_history=history,
+                golden_solution=golden
+            )
+
+            st.download_button(
+                label="📥 Download Full Report (PDF)",
+                data=pdf_data,
+                file_name=f"formulation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+            st.success("✅ PDF report generated successfully.")
+        else:
+            st.info("Run the optimisation first to generate a PDF report.")
 
 if __name__ == "__main__":
     main()
