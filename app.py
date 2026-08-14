@@ -5,7 +5,7 @@
 # v32.6 features:
 #   - Corrected interaction features & monotonicity gradient
 #   - PDF report in dedicated "Report" tab
-#   - Dashboard inside expander (loss curve removed to avoid duplication)
+#   - Dashboard inside expander (loss curve restored)
 #   - 2D Pareto slider removed (kept 3D Pareto only)
 #   - Unified UI/Chart palette: #667eea (primary), #764ba2 (secondary),
 #     #2f9e44 (success), #e8590c (warning), #e03131 (danger), #FFD700 (golden)
@@ -1227,7 +1227,7 @@ def get_current_formulation_results(return_std=False):
     return result
 
 # ================================================================
-# DASHBOARD (inside an expander, loss curve removed)
+# DASHBOARD (inside an expander, loss curve restored)
 # ================================================================
 def render_dashboard():
     with st.expander("📊 Dashboard Panel (Training & Optimization Status)", expanded=False):
@@ -1303,7 +1303,39 @@ def render_dashboard():
             else:
                 st.caption("Run optimisation to enable downloads.")
 
-        # Small Pareto plot (using unified palette)
+        # ---- Loss Curve (restored) ----
+        if history and len(history.get('loss', [])) > 1:
+            st.subheader("📉 Loss Curve")
+            fig_loss = go.Figure()
+            # Training Loss (validation loss)
+            fig_loss.add_trace(go.Scatter(
+                y=history['loss'],
+                mode='lines+markers',
+                name='Training Loss',
+                line=dict(color='#667eea', width=2),
+                marker=dict(color='#667eea', size=4)
+            ))
+            # Physics Loss (if available)
+            if 'physics' in history and len(history['physics']) > 1:
+                fig_loss.add_trace(go.Scatter(
+                    y=history['physics'],
+                    mode='lines+markers',
+                    name='Physics Loss',
+                    line=dict(color='#764ba2', width=2, dash='dash'),
+                    marker=dict(color='#764ba2', size=4)
+                ))
+            fig_loss.update_layout(
+                title='Loss Evolution (recorded every 20 epochs)',
+                xaxis_title='Epochs',
+                yaxis_title='Loss Value',
+                height=250,
+                plot_bgcolor='#f8f9fa',
+                paper_bgcolor='#ffffff',
+                font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
+            )
+            st.plotly_chart(fig_loss, use_container_width=True)
+
+        # ---- Small Pareto plot (unified palette) ----
         if solutions:
             st.subheader("🌐 Pareto Front (API vs EFRF)")
             api_vals = [s['API (%)'] for s in solutions]
@@ -1658,9 +1690,8 @@ def render_training_progress():
     data_source = history.get('data_source', 'unknown')
     st.info(f"📊 Model trained on: **{data_source.upper()}** data ({history.get('n_samples', '?')} samples)")
 
-    # Loss curve with unified colours (Training Loss & Physics Loss)
+    # Loss curve (Training Loss + Physics Loss)
     fig_loss = go.Figure()
-    # Training Loss (validation loss)
     fig_loss.add_trace(go.Scatter(
         y=history['loss'],
         mode='lines+markers',
@@ -1668,7 +1699,6 @@ def render_training_progress():
         line=dict(color='#667eea', width=2),
         marker=dict(color='#667eea', size=4)
     ))
-    # Physics Loss (if available)
     if 'physics' in history and len(history['physics']) > 1:
         fig_loss.add_trace(go.Scatter(
             y=history['physics'],
