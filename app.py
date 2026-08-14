@@ -2,16 +2,14 @@
 # Hybrid AI · Multi-Objective Tablet Optimization (v32.6)
 # Nile Valley University · Sudan · Pharmaceutical Engineering
 #
-# v32.6 fixes:
-#   - Interaction features now use correct column indices
-#   - Monotonicity gradient uses Pressure (index 6) instead of Moisture
-#   - PDF report is accessible via a dedicated "Report" tab
-#   - Dashboard appears on first optimisation run
-#   - PDF includes disintegration/dissolution and Golden Solution details
-#   - Fixed KeyError in PDF report: loss_history keys are 'loss', 'data', 'physics'
-#   - Removed 2D Pareto front evolution slider (kept 3D Pareto only)
-#   - Removed duplicate loss curve from Dashboard (kept in Training Progress)
-#   - Modernised CSS with gradients, hover effects, and unified palette
+# v32.6 features:
+#   - Corrected interaction features & monotonicity gradient
+#   - PDF report in dedicated "Report" tab
+#   - Dashboard inside expander (loss curve removed to avoid duplication)
+#   - 2D Pareto slider removed (kept 3D Pareto only)
+#   - Unified UI/Chart palette: #667eea (primary), #764ba2 (secondary),
+#     #2f9e44 (success), #e8590c (warning), #e03131 (danger), #FFD700 (golden)
+#   - Modern CSS with gradients, shadows, hover effects
 # ================================================================
 import streamlit as st
 import numpy as np
@@ -42,7 +40,7 @@ st.set_page_config(
 )
 
 # ================================================================
-# THEME / UI POLISH (Updated with modern CSS)
+# THEME / UI POLISH (Modern CSS with unified palette)
 # ================================================================
 def inject_custom_css():
     st.markdown("""
@@ -1058,7 +1056,7 @@ class NSGAIIOptimizer:
             yield pop, obj, history, gen
 
 # ================================================================
-# ANALYSIS FUNCTIONS (from v32.3)
+# ANALYSIS FUNCTIONS (with unified chart colors)
 # ================================================================
 def perform_sensitivity_analysis(model, scaler, ref_solution):
     try:
@@ -1078,15 +1076,45 @@ def perform_sensitivity_analysis(model, scaler, ref_solution):
         return None
 
 def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
-    fig = go.Figure(data=[go.Scatter3d(x=pop[:, 0], y=obj[:, 2], z=-obj[:, 1], mode='markers',
-                                        marker=dict(size=4, color=pop[:, 0], colorscale='Viridis'), name='Pareto')])
+    # Use unified color scale
+    fig = go.Figure(data=[go.Scatter3d(
+        x=pop[:, 0], y=obj[:, 2], z=-obj[:, 1],
+        mode='markers',
+        marker=dict(
+            size=4,
+            color=pop[:, 0],
+            colorscale=[[0, '#667eea'], [1, '#764ba2']],
+            colorbar=dict(title='API (%)')
+        ),
+        name='Pareto'
+    )])
     if golden_idx is not None:
-        fig.add_trace(go.Scatter3d(x=[pop[golden_idx, 0]], y=[obj[golden_idx, 2]], z=[-obj[golden_idx, 1]],
-                                    mode='markers', marker=dict(size=15, color='gold', symbol='diamond'), name='Golden'))
+        fig.add_trace(go.Scatter3d(
+            x=[pop[golden_idx, 0]], y=[obj[golden_idx, 2]], z=[-obj[golden_idx, 1]],
+            mode='markers',
+            marker=dict(size=15, color='#FFD700', symbol='diamond',
+                        line=dict(width=1.5, color='#8a6d00')),
+            name='Golden'
+        ))
     if tested_data is not None:
-        fig.add_trace(go.Scatter3d(x=[tested_data['api']], y=[tested_data['efrf']], z=[tested_data['tensile']],
-                                    mode='markers', marker=dict(size=12, color='blue', symbol='circle'), name='Tested Formulation'))
-    fig.update_layout(scene=dict(xaxis_title='API (%)', yaxis_title='EFRF', zaxis_title='Tensile (MPa)'), height=450)
+        fig.add_trace(go.Scatter3d(
+            x=[tested_data['api']], y=[tested_data['efrf']], z=[tested_data['tensile']],
+            mode='markers',
+            marker=dict(size=12, color='#2f9e44', symbol='circle',
+                        line=dict(width=1.5, color='white')),
+            name='Tested Formulation'
+        ))
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='API (%)',
+            yaxis_title='EFRF',
+            zaxis_title='Tensile (MPa)'
+        ),
+        height=450,
+        font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333"),
+        plot_bgcolor='#f8f9fa',
+        paper_bgcolor='#ffffff'
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 # ================================================================
@@ -1186,10 +1214,9 @@ def get_current_formulation_results(return_std=False):
     return result
 
 # ================================================================
-# DASHBOARD (inside an expander, closed by default, loss curve removed)
+# DASHBOARD (inside an expander, loss curve removed)
 # ================================================================
 def render_dashboard():
-    """Dashboard panel inside a collapsible expander."""
     with st.expander("📊 Dashboard Panel (Training & Optimization Status)", expanded=False):
         history = st.session_state.get('_trained_history', {})
         golden = st.session_state.get('golden_solution', None)
@@ -1263,28 +1290,33 @@ def render_dashboard():
             else:
                 st.caption("Run optimisation to enable downloads.")
 
-        # ---- Loss Curve section REMOVED to avoid duplication ----
-        # (Training progress plot already shows validation loss)
-        # ---- Small Pareto front (kept, not duplicated elsewhere) ----
+        # Small Pareto plot (using unified palette)
         if solutions:
             st.subheader("🌐 Pareto Front (API vs EFRF)")
             api_vals = [s['API (%)'] for s in solutions]
             efrf_vals = [s['EFRF'] for s in solutions]
             fig_pareto = go.Figure()
             fig_pareto.add_trace(go.Scatter(
-                x=api_vals, y=efrf_vals, mode='markers+lines',
-                name='Pareto Solutions', marker=dict(size=6, color='green')
+                x=api_vals, y=efrf_vals,
+                mode='markers+lines',
+                name='Pareto Solutions',
+                marker=dict(size=6, color='#667eea'),
+                line=dict(color='#764ba2', width=2)
             ))
             if golden:
                 fig_pareto.add_trace(go.Scatter(
                     x=[golden['API (%)']], y=[golden['EFRF']],
-                    mode='markers', name='Golden Solution',
-                    marker=dict(size=12, color='gold', symbol='star')
+                    mode='markers',
+                    name='Golden Solution',
+                    marker=dict(size=14, color='#FFD700', symbol='star',
+                                line=dict(width=1.5, color='#8a6d00'))
                 ))
             fig_pareto.update_layout(
                 xaxis_title="API (%)",
                 yaxis_title="EFRF",
-                template="plotly_white",
+                plot_bgcolor='#f8f9fa',
+                paper_bgcolor='#ffffff',
+                font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333"),
                 height=250
             )
             st.plotly_chart(fig_pareto, use_container_width=True)
@@ -1292,7 +1324,7 @@ def render_dashboard():
         st.caption(f"⏱️ Total runtime: {runtime:.1f}s")
 
 # ================================================================
-# UI RENDER FUNCTIONS (from v32.3, with uncertainty & PDF)
+# UI RENDER FUNCTIONS (with unified chart colors)
 # ================================================================
 def render_sidebar():
     with st.sidebar:
@@ -1418,9 +1450,11 @@ def render_binder_grade_comparison():
         for name, p in BINDER_GRADES.items()
     ])
     fig = go.Figure()
-    for col in ["Compressibility", "Disintegration", "Flowability"]:
+    colors = ['#667eea', '#764ba2', '#2f9e44']
+    for i, col in enumerate(["Compressibility", "Disintegration", "Flowability"]):
         fig.add_trace(go.Bar(
             x=df["Binder Grade"], y=df[col], name=col,
+            marker_color=colors[i % len(colors)],
             text=[f"{v:.0f}%" for v in df[col]], textposition="outside"
         ))
     fig.update_layout(
@@ -1430,7 +1464,8 @@ def render_binder_grade_comparison():
         height=350,
         margin=dict(l=0, r=0, t=40, b=0),
         plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)'
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1610,17 +1645,48 @@ def render_training_progress():
     data_source = history.get('data_source', 'unknown')
     st.info(f"📊 Model trained on: **{data_source.upper()}** data ({history.get('n_samples', '?')} samples)")
 
-    # Loss curve (Validation Loss) – kept because it's the most important generalisation metric
+    # Loss curve with unified colors
     fig_loss = go.Figure()
-    fig_loss.add_trace(go.Scatter(y=history['loss'], mode='lines', name='Validation Loss', line=dict(color='#ff6b6b', width=2)))
-    fig_loss.update_layout(title='Loss Evolution (real validation loss, recorded every 20 epochs)',
-                            xaxis_title='Recorded checkpoint', yaxis_title='MSE Loss', height=250)
+    fig_loss.add_trace(go.Scatter(
+        y=history['loss'],
+        mode='lines',
+        name='Validation Loss',
+        line=dict(color='#667eea', width=2)
+    ))
+    fig_loss.update_layout(
+        title='Loss Evolution (real validation loss, recorded every 20 epochs)',
+        xaxis_title='Recorded checkpoint',
+        yaxis_title='MSE Loss',
+        height=250,
+        plot_bgcolor='#f8f9fa',
+        paper_bgcolor='#ffffff',
+        font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
+    )
     st.plotly_chart(fig_loss, use_container_width=True)
+
+    # R² and RMSE with unified colors
     fig_metrics = go.Figure()
-    fig_metrics.add_trace(go.Scatter(y=history['r2'], mode='lines', name='R² Score', line=dict(color='#51cf66', width=2)))
-    fig_metrics.add_trace(go.Scatter(y=history['rmse'], mode='lines', name='RMSE', line=dict(color='#5c7cfa', width=2)))
-    fig_metrics.update_layout(title='Model Performance (real validation metrics)',
-                               xaxis_title='Recorded checkpoint', yaxis_title='Metric Value', height=250)
+    fig_metrics.add_trace(go.Scatter(
+        y=history['r2'],
+        mode='lines',
+        name='R² Score',
+        line=dict(color='#2f9e44', width=2)
+    ))
+    fig_metrics.add_trace(go.Scatter(
+        y=history['rmse'],
+        mode='lines',
+        name='RMSE',
+        line=dict(color='#e8590c', width=2)
+    ))
+    fig_metrics.update_layout(
+        title='Model Performance (real validation metrics)',
+        xaxis_title='Recorded checkpoint',
+        yaxis_title='Metric Value',
+        height=250,
+        plot_bgcolor='#f8f9fa',
+        paper_bgcolor='#ffffff',
+        font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
+    )
     st.plotly_chart(fig_metrics, use_container_width=True)
     st.success(f"✅ Training complete! Final validation R² (macro-average across 5 outputs) = "
                f"{history['r2'][-1]:.3f}, RMSE = {history['rmse'][-1]:.3f}")
@@ -1640,7 +1706,7 @@ def render_training_progress():
             )
 
 # ================================================================
-# render_pareto_evolution() has been REMOVED as requested.
+# render_pareto_evolution() has been REMOVED.
 # Only 3D Pareto remains.
 # ================================================================
 
@@ -1721,14 +1787,19 @@ def render_side_by_side_comparison(golden, all_solutions):
                     ],
                     theta=categories,
                     fill='toself',
-                    name=sol["Solution"]
+                    name=sol["Solution"],
+                    line=dict(color='#667eea', width=1.5),
+                    marker=dict(color='#764ba2', size=4)
                 ))
         fig.update_layout(
             polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
             showlegend=True,
             height=400,
             margin=dict(l=40, r=40, t=40, b=40),
-            title="Performance Comparison Across Selected Solutions"
+            title="Performance Comparison Across Selected Solutions",
+            plot_bgcolor='#f8f9fa',
+            paper_bgcolor='#ffffff',
+            font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -1892,7 +1963,27 @@ def _render_full_results():
                               golden['MgSt (%)'], golden['MCC (%)'], golden['Moisture (%)'], 200.0, 20.0])
                 )
                 if sens_data:
-                    st.bar_chart(pd.Series(sens_data))
+                    # Use a Plotly bar chart with unified colors
+                    fig_sens = go.Figure()
+                    features = list(sens_data.keys())
+                    values = list(sens_data.values())
+                    colors = ['#667eea' if v > np.mean(values) else '#764ba2' for v in values]
+                    fig_sens.add_trace(go.Bar(
+                        x=features, y=values,
+                        marker_color=colors,
+                        text=[f"{v:.4f}" for v in values],
+                        textposition='outside'
+                    ))
+                    fig_sens.update_layout(
+                        title='Sensitivity Analysis (EFRF)',
+                        xaxis_title='Parameters',
+                        yaxis_title='Sensitivity (ΔEFRF)',
+                        plot_bgcolor='#f8f9fa',
+                        paper_bgcolor='#ffffff',
+                        font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333"),
+                        height=350
+                    )
+                    st.plotly_chart(fig_sens, use_container_width=True)
                 else:
                     st.warning("Could not compute local sensitivity (error in analysis).")
             except Exception as e:
