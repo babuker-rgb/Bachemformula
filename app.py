@@ -1931,18 +1931,21 @@ def _render_full_results():
         model = st.session_state.get('_trained_model')
         scaler = st.session_state.get('_trained_scaler')
         golden = st.session_state.get('golden_solution')
-        if model and scaler and golden:
-            sens_data = perform_sensitivity_analysis(
-                model, scaler,
-                np.array([golden['API (%)'], golden['Binder (%)'], golden['PVPP (%)'],
-                          golden['MgSt (%)'], golden['MCC (%)'], golden['Moisture (%)'], 200.0, 20.0])
-            )
-            if sens_data:
-                st.bar_chart(pd.Series(sens_data))
-            else:
-                st.warning("Could not compute local sensitivity.")
+        if model is not None and scaler is not None and golden is not None:
+            try:
+                sens_data = perform_sensitivity_analysis(
+                    model, scaler,
+                    np.array([golden['API (%)'], golden['Binder (%)'], golden['PVPP (%)'],
+                              golden['MgSt (%)'], golden['MCC (%)'], golden['Moisture (%)'], 200.0, 20.0])
+                )
+                if sens_data:
+                    st.bar_chart(pd.Series(sens_data))
+                else:
+                    st.warning("Could not compute local sensitivity (error in analysis).")
+            except Exception as e:
+                st.warning(f"Could not compute local sensitivity: {e}")
         else:
-            st.warning("Model or Golden Solution missing for Sensitivity Analysis.")
+            st.warning("Model, Scaler, or Golden Solution missing for Sensitivity Analysis.")
 
 def _run_optimization(w_api, w_quality):
     start_time = time.time()
