@@ -9,6 +9,7 @@
 #   - Dashboard appears on first optimisation run
 #   - PDF includes disintegration/dissolution and Golden Solution details
 #   - Fixed KeyError in PDF report: loss_history keys are 'loss', 'data', 'physics'
+#   - Removed 2D Pareto front evolution slider (kept 3D Pareto only)
 #
 # All other features from v32.5 are retained.
 # ================================================================
@@ -1613,115 +1614,10 @@ def render_training_progress():
                 f"{history.get('n_val', '?')} held-out samples."
             )
 
-def render_pareto_evolution():
-    st.markdown("---")
-    st.markdown("## 🌐 Pareto Front Evolution: API% vs EFRF")
-    golden = st.session_state.get('golden_solution', None)
-    pareto_history = st.session_state.get('pareto_history', None)
-    if not pareto_history:
-        st.info("Run the optimization to see the real Pareto front evolve across generations.")
-        return
-    generations_recorded = [h['generation'] for h in pareto_history]
-    gen_slider = st.select_slider("Select generation to view", options=generations_recorded, value=generations_recorded[-1])
-    current_entry = next(h for h in pareto_history if h['generation'] == gen_slider)
-    current_obj = current_entry['pareto_objectives']
-    current_pop = current_entry['pareto_solutions']
-    api_vals = current_pop[:, 0]
-    efrf_vals = current_obj[:, 2]
-    feasible_mask = efrf_vals < 0.40
-    api_feas = api_vals[feasible_mask]
-    efrf_feas = efrf_vals[feasible_mask]
-    sort_idx = np.argsort(api_feas)
-    api_sorted = api_feas[sort_idx]
-    efrf_sorted = efrf_feas[sort_idx]
-    # Use real values (no cumulative minimum)
-    if len(efrf_sorted) > 0:
-        cummin_efrf = efrf_sorted
-    else:
-        cummin_efrf = efrf_sorted
-
-    fig = go.Figure()
-    fig.add_hrect(
-        y0=0, y1=0.40, x0=API_MIN, x1=API_MAX,
-        fillcolor='rgba(144, 238, 144, 0.25)', line_width=0,
-        layer='below'
-    )
-    fig.add_trace(go.Scatter(
-        x=[None], y=[None], mode='markers',
-        marker=dict(size=12, symbol='square', color='rgba(144, 238, 144, 0.5)'),
-        name='Feasible region (EFRF < 0.40)'
-    ))
-    fig.add_trace(go.Scatter(
-        x=api_sorted,
-        y=cummin_efrf,
-        mode='lines+markers',
-        name='Pareto Front',
-        line=dict(color='red', width=2),
-        marker=dict(size=8, color='#a3c4f3', line=dict(width=1, color='#4a6fa5')),
-        hovertemplate='API: %{x:.2f}%<br>EFRF: %{y:.3f}<extra></extra>'
-    ))
-    if len(api_sorted) > 0 and api_sorted[-1] < API_MAX:
-        last_api = api_sorted[-1]
-        fig.add_vrect(
-            x0=last_api, x1=API_MAX,
-            fillcolor='rgba(150,150,150,0.10)', line_width=0, layer='below'
-        )
-        fig.add_annotation(
-            x=(last_api + API_MAX) / 2, y=0.40, yshift=14, showarrow=False,
-            text=f"No Pareto solutions found above {last_api:.1f}% API<br>in this run",
-            font=dict(size=11, color='#868e96'), align='center'
-        )
-    if golden:
-        fig.add_trace(go.Scatter(
-            x=[golden['API (%)']],
-            y=[golden['EFRF']],
-            mode='markers',
-            name='🏆 Golden Solution',
-            marker=dict(size=22, color='gold', symbol='star', line=dict(width=1.5, color='#8a6d00')),
-            hovertemplate=(f"<b>🏆 Golden Solution</b><br>API: {golden['API (%)']:.2f}%<br>"
-                            f"EFRF: {golden['EFRF']:.3f}<br>"
-                            "<i>Chosen by weighted API/Quality score,<br>"
-                            "not by minimizing EFRF — see note below</i><extra></extra>")
-        ))
-    tested = st.session_state.get('results')
-    if tested and 'api' in tested and 'efrf' in tested:
-        fig.add_trace(go.Scatter(
-            x=[tested['api']],
-            y=[tested['efrf']],
-            mode='markers',
-            name='🔵 Tested Formulation',
-            marker=dict(size=14, color='blue', symbol='circle', line=dict(width=1.5, color='white')),
-            hovertemplate=f"<b>Tested Formulation</b><br>API: {tested['api']:.2f}%<br>EFRF: {tested['efrf']:.3f}<extra></extra>"
-        ))
-    fig.add_hline(y=0.40, line_dash='dash', line_color='gray',
-                  annotation_text='EFRF limit (0.40)', annotation_position='top left')
-    fig.add_vline(x=API_MIN, line_dash='dash', line_color='gray',
-                  annotation_text=f'API min ({API_MIN}%)', annotation_position='bottom left')
-    fig.add_vline(x=API_MAX, line_dash='dash', line_color='gray',
-                  annotation_text=f'API max ({API_MAX}%)', annotation_position='bottom right')
-    gen_display = gen_slider + 1
-    fig.update_layout(
-        title=f'Pareto Front - Generation {gen_display}/{NSGA_GENERATIONS}',
-        xaxis_title='API (%)',
-        yaxis_title='EFRF',
-        height=500,
-        template='plotly_white',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        f"**Generation {gen_display}/{NSGA_GENERATIONS}** · "
-        f"Pareto-optimal solutions at this generation: {len(api_sorted)}"
-    )
-    if golden and len(api_sorted) > 0:
-        st.caption(
-            "ℹ️ The red line shows the *best EFRF achieved at each API* — a 2D slice "
-            "of the real Pareto front, which also weighs Density and Tensile. The "
-            "🏆 Golden Solution is chosen by a weighted API/Quality score (set in the "
-            "sidebar), not by minimizing EFRF alone, so it can sit above this line "
-            "while still being non-dominated in the full 3-objective search — see the "
-            "3D Pareto front below for the complete picture."
-        )
+# ================================================================
+# render_pareto_evolution() has been REMOVED as requested.
+# Only 3D Pareto remains.
+# ================================================================
 
 def render_golden_solution(golden):
     if not golden:
@@ -1939,7 +1835,8 @@ def render_optimization_summary():
 # MAIN ORCHESTRATION
 # ================================================================
 def _render_full_results():
-    render_pareto_evolution()
+    # The 2D Pareto evolution slider has been removed.
+    # Only the 3D Pareto front remains.
     with st.expander("🌐 3D Pareto Front (API - EFRF - Tensile)", expanded=False):
         gen_history = st.session_state.get('pareto_history')
         if gen_history:
