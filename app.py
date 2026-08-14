@@ -10,8 +10,8 @@
 #   - PDF includes disintegration/dissolution and Golden Solution details
 #   - Fixed KeyError in PDF report: loss_history keys are 'loss', 'data', 'physics'
 #   - Removed 2D Pareto front evolution slider (kept 3D Pareto only)
-#
-# All other features from v32.5 are retained.
+#   - Removed duplicate loss curve from Dashboard (kept in Training Progress)
+#   - Modernised CSS with gradients, hover effects, and unified palette
 # ================================================================
 import streamlit as st
 import numpy as np
@@ -42,54 +42,97 @@ st.set_page_config(
 )
 
 # ================================================================
-# THEME / UI POLISH (from v32.3)
+# THEME / UI POLISH (Updated with modern CSS)
 # ================================================================
 def inject_custom_css():
     st.markdown("""
     <style>
-    :root {
-        --brand-1: #667eea;
-        --brand-2: #764ba2;
-        --good: #2f9e44;
-        --good-bg: #ebfbee;
-        --warn: #e8590c;
-        --warn-bg: #fff4e6;
-        --bad: #e03131;
-        --bad-bg: #fff5f5;
+    /* Elegant gradient background */
+    body {
+        background: linear-gradient(135deg, #f8f9fa 0%, #eceef2 50%, #ffffff 100%);
+        font-family: 'Inter', 'Segoe UI', sans-serif;
     }
-    .block-container { padding-top: 1.5rem; max-width: 1300px; }
-    h1, h2, h3 { letter-spacing: -0.01em; }
+
+    /* Card styling for metrics */
     div[data-testid="stMetric"] {
         background: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 14px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        transition: transform 0.2s ease-in-out;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: scale(1.02);
+    }
+
+    /* Headings */
+    h1, h2, h3 {
+        font-family: 'Inter', 'Segoe UI', sans-serif;
+        letter-spacing: -0.01em;
+        color: #333333;
+    }
+
+    /* Buttons */
+    button {
+        border-radius: 8px !important;
+        background: linear-gradient(135deg, #667eea, #764ba2) !important;
+        color: white !important;
+        font-weight: 600;
+        transition: background 0.3s ease;
+    }
+    button:hover {
+        background: linear-gradient(135deg, #5a67d8, #6b46c1) !important;
+    }
+
+    /* Progress bar */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #667eea, #764ba2);
+        border-radius: 10px;
+    }
+
+    /* Expander styling */
+    div[data-testid="stExpander"] {
         border: 1px solid #eceef2;
         border-radius: 10px;
-        padding: 12px 14px 8px 14px;
-        box-shadow: 0 1px 3px rgba(20,20,43,0.04);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
     }
-    div[data-testid="stMetricLabel"] { font-size: 0.82rem; opacity: 0.75; }
+
+    /* Status badges */
     .status-badge {
-        display: inline-block; padding: 2px 10px; border-radius: 999px;
-        font-size: 0.78rem; font-weight: 600; margin-top: 4px;
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin-top: 6px;
     }
-    .badge-good { color: var(--good); background: var(--good-bg); }
-    .badge-warn { color: var(--warn); background: var(--warn-bg); }
-    .badge-bad  { color: var(--bad);  background: var(--bad-bg); }
+    .badge-good { color: #2f9e44; background: #ebfbee; }
+    .badge-warn { color: #e8590c; background: #fff4e6; }
+    .badge-bad  { color: #e03131; background: #fff5f5; }
+
+    /* App header (kept from original) */
     .app-header {
-        background: linear-gradient(135deg, var(--brand-1) 0%, var(--brand-2) 100%);
-        padding: 22px 28px; border-radius: 14px; color: white;
-        box-shadow: 0 6px 18px rgba(102,126,234,0.25); margin-bottom: 4px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        padding: 22px 28px;
+        border-radius: 14px;
+        color: white;
+        box-shadow: 0 6px 18px rgba(102,126,234,0.25);
+        margin-bottom: 4px;
     }
     .app-header h1 { color: white; margin: 0; font-size: 1.6rem; }
     .app-header p { color: rgba(255,255,255,0.88); margin: 4px 0 0 0; font-size: 0.92rem; }
+
+    /* Live-check banners (OK / Warn / Fail) */
     .live-check {
-        border-radius: 10px; padding: 10px 14px; font-size: 0.88rem;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 0.88rem;
         border: 1px solid transparent;
     }
-    .live-check.ok   { background: var(--good-bg); color: var(--good); border-color: #d3f9d8; }
-    .live-check.warn { background: var(--warn-bg); color: var(--warn); border-color: #ffe8cc; }
-    .live-check.bad  { background: var(--bad-bg);  color: var(--bad);  border-color: #ffc9c9; }
-    section[data-testid="stSidebar"] .stButton button { border-radius: 8px; }
-    div[data-testid="stTabs"] button[role="tab"] { font-weight: 600; }
+    .live-check.ok   { background: #ebfbee; color: #2f9e44; border-color: #d3f9d8; }
+    .live-check.warn { background: #fff4e6; color: #e8590c; border-color: #ffe8cc; }
+    .live-check.bad  { background: #fff5f5; color: #e03131; border-color: #ffc9c9; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1143,7 +1186,7 @@ def get_current_formulation_results(return_std=False):
     return result
 
 # ================================================================
-# DASHBOARD (inside an expander, closed by default)
+# DASHBOARD (inside an expander, closed by default, loss curve removed)
 # ================================================================
 def render_dashboard():
     """Dashboard panel inside a collapsible expander."""
@@ -1220,28 +1263,9 @@ def render_dashboard():
             else:
                 st.caption("Run optimisation to enable downloads.")
 
-        # Loss Curve
-        if history and len(history.get('loss', [])) > 1:
-            st.subheader("📉 Loss Curve")
-            fig_loss = go.Figure()
-            fig_loss.add_trace(go.Scatter(
-                y=history['loss'], mode='lines+markers', name='Training Loss',
-                line=dict(color='blue', width=2)
-            ))
-            if 'physics' in history and len(history['physics']) > 1:
-                fig_loss.add_trace(go.Scatter(
-                    y=history['physics'], mode='lines+markers', name='Physics Loss',
-                    line=dict(color='red', width=2, dash='dash')
-                ))
-            fig_loss.update_layout(
-                xaxis_title="Epochs (recorded every 20)",
-                yaxis_title="Loss",
-                template="plotly_white",
-                height=250
-            )
-            st.plotly_chart(fig_loss, use_container_width=True)
-
-        # Pareto Front (small)
+        # ---- Loss Curve section REMOVED to avoid duplication ----
+        # (Training progress plot already shows validation loss)
+        # ---- Small Pareto front (kept, not duplicated elsewhere) ----
         if solutions:
             st.subheader("🌐 Pareto Front (API vs EFRF)")
             api_vals = [s['API (%)'] for s in solutions]
@@ -1586,6 +1610,7 @@ def render_training_progress():
     data_source = history.get('data_source', 'unknown')
     st.info(f"📊 Model trained on: **{data_source.upper()}** data ({history.get('n_samples', '?')} samples)")
 
+    # Loss curve (Validation Loss) – kept because it's the most important generalisation metric
     fig_loss = go.Figure()
     fig_loss.add_trace(go.Scatter(y=history['loss'], mode='lines', name='Validation Loss', line=dict(color='#ff6b6b', width=2)))
     fig_loss.update_layout(title='Loss Evolution (real validation loss, recorded every 20 epochs)',
