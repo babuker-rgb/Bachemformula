@@ -109,7 +109,7 @@ def status_badge_html(level, text):
     return f'<span class="status-badge {cls}">{text}</span>'
 
 # ================================================================
-# CONSTANTS (from v32.3, expanded ranges)
+# CONSTANTS (Reduced for faster initial training)
 # ================================================================
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
@@ -135,8 +135,8 @@ BINDER_GRADES = {
 BINDER_GRADE_NAMES = list(BINDER_GRADES.keys())
 POPULATION_SIZE = 50
 NSGA_GENERATIONS = 80
-TRAINING_EPOCHS = 1200
-N_SAMPLES = 8000
+TRAINING_EPOCHS = 300        # Reduced from 1200
+N_SAMPLES = 2000             # Reduced from 8000
 BOUNDARY_FRACTION = 0.30
 
 # Physics loss weights (v32.4 style)
@@ -1233,7 +1233,6 @@ def render_dashboard():
             )
             st.plotly_chart(fig_pareto, use_container_width=True)
 
-        # Runtime summary (already shown above, but we keep it concise)
         st.caption(f"⏱️ Total runtime: {runtime:.1f}s")
 
 # ================================================================
@@ -1328,6 +1327,7 @@ def render_sidebar():
             st.markdown(f"**Population:** {POPULATION_SIZE}")
             st.markdown(f"**Generations:** {NSGA_GENERATIONS}")
             st.markdown(f"**Training Epochs:** {TRAINING_EPOCHS}")
+            st.markdown(f"**Synthetic samples:** {N_SAMPLES}")
             st.markdown("**Algorithm:** NSGA‑II (3 obj + penalties)")
             st.markdown("**Model:** Physics‑Informed NN (v32.5 ultimate)")
             st.markdown("**Constraint:** Mass Balance (iterative)")
