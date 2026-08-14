@@ -8,6 +8,7 @@
 #   - PDF report is accessible via a dedicated "Report" tab
 #   - Dashboard appears on first optimisation run
 #   - PDF includes disintegration/dissolution and Golden Solution details
+#   - Fixed KeyError in PDF report: loss_history keys are 'loss', 'data', 'physics'
 #
 # All other features from v32.5 are retained.
 # ================================================================
@@ -400,6 +401,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
                              model_comparison_df=None, loss_history=None, golden_solution=None):
     """
     Generate a comprehensive PDF report. Now includes disintegration/dissolution and Golden Solution.
+    FIXED: uses correct loss_history keys ('loss', 'data', 'physics').
     """
     pdf = FPDF()
     pdf.add_page()
@@ -546,16 +548,22 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
         pdf.ln(4)
 
-    # Training Loss Summary
-    if loss_history and len(loss_history['train']) > 0:
-        pdf.set_font("Arial", "B", 13)
-        pdf.set_fill_color(230, 230, 230)
-        pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
-        pdf.set_font("Arial", "", 10)
-        pdf.cell(0, 6, f"Final Training Loss: {loss_history['train'][-1]:.6f}", ln=True)
-        pdf.cell(0, 6, f"Final Data Loss: {loss_history['data'][-1]:.6f}", ln=True)
-        pdf.cell(0, 6, f"Final Physics Loss: {loss_history['physics'][-1]:.6f}", ln=True)
-        pdf.ln(4)
+    # Training Loss Summary (FIXED: use correct keys)
+    if loss_history:
+        train_losses = loss_history.get('loss', [])
+        data_losses = loss_history.get('data', [])
+        physics_losses = loss_history.get('physics', [])
+        if train_losses:
+            pdf.set_font("Arial", "B", 13)
+            pdf.set_fill_color(230, 230, 230)
+            pdf.cell(0, 8, sanitize_text("6. Training Loss Summary"), ln=True, fill=True)
+            pdf.set_font("Arial", "", 10)
+            pdf.cell(0, 6, f"Final Training Loss: {train_losses[-1]:.6f}", ln=True)
+            if data_losses:
+                pdf.cell(0, 6, f"Final Data Loss: {data_losses[-1]:.6f}", ln=True)
+            if physics_losses:
+                pdf.cell(0, 6, f"Final Physics Loss: {physics_losses[-1]:.6f}", ln=True)
+            pdf.ln(4)
 
     # Recommendations
     pdf.set_font("Arial", "B", 13)
