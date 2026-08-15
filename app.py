@@ -2,15 +2,15 @@
 # Hybrid AI · Multi-Objective Tablet Optimization (v32.6)
 # Nile Valley University · Sudan · Pharmaceutical Engineering
 #
-# v32.6 fixes:
+# v32.6 features:
 #   - Corrected interaction features & monotonicity gradient
-#   - PDF report in dedicated "Report" tab
+#   - PDF report with 2D and 3D Pareto plots (3D saved as image)
 #   - Dashboard inside expander (loss curve restored)
-#   - 2D Pareto slider removed (kept 3D Pareto only)
-#   - Fixed StreamlitDuplicateElementId by controlling dashboard render
+#   - 2D Pareto slider removed (kept 3D Pareto in UI and PDF)
+#   - Fixed StreamlitDuplicateElementId
 #   - Unified UI/Chart palette: #667eea (primary), #764ba2 (secondary),
 #     #2f9e44 (success), #e8590c (warning), #e03131 (danger), #FFD700 (golden)
-#   - Modern CSS with gradients, shadows, hover effects
+#   - Modern CSS with gradients, shadows, hover, fade‑in, and larger titles
 # ================================================================
 import streamlit as st
 import numpy as np
@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import plotly.graph_objects as go
+import plotly.io as pio
 import time
 import warnings
 import json
@@ -41,7 +42,7 @@ st.set_page_config(
 )
 
 # ================================================================
-# THEME / UI POLISH (Modern CSS with unified palette)
+# THEME / UI POLISH (Modern CSS with unified palette & enhancements)
 # ================================================================
 def inject_custom_css():
     st.markdown("""
@@ -58,6 +59,15 @@ def inject_custom_css():
         font-family: 'Inter', 'Segoe UI', sans-serif;
         letter-spacing: -0.01em;
         color: #2d3748;
+    }
+    .dashboard-title {
+        font-size: 1.2rem !important;
+        font-weight: 600;
+        color: #2d3748;
+        margin-bottom: 0.5rem;
+    }
+    .dashboard-title i {
+        margin-right: 6px;
     }
 
     /* Metric cards */
@@ -145,6 +155,15 @@ def inject_custom_css():
         background: linear-gradient(135deg, #667eea, #764ba2) !important;
         color: white !important;
     }
+
+    /* Fade-in animation for charts */
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in {
+        animation: fadeIn 0.5s ease-out;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -214,7 +233,7 @@ def initialize_session_state():
         'user_data': None, 'data_source': 'synthetic',
         'force_retrain': False,
         '_trained_model': None, '_trained_scaler': None, '_trained_history': None,
-        'dashboard_rendered': False  # NEW: flag to prevent duplicate dashboard
+        'dashboard_rendered': False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -273,7 +292,6 @@ def add_interaction_features(X_raw):
     [API, Binder, PVPP, MgSt, MCC, Moisture, Pressure, Speed]
     Returns augmented array with additional interaction terms.
     """
-    # Extract correct columns
     api = X_raw[:, 0:1]          # index 0
     binder = X_raw[:, 1:2]       # index 1
     pvpp = X_raw[:, 2:3]         # index 2 (not used directly)
@@ -302,12 +320,6 @@ def add_interaction_features(X_raw):
 # OOD SHRINKAGE (from v32.1)
 # ================================================================
 def apply_ood_shrinkage(pred, pop_scaled, y_train_mean):
-    """
-    pred: array (n, 5) with columns [density, tensile, efrf, disintegration, dissolution]
-    pop_scaled: scaled input features (n, n_features)
-    y_train_mean: means of training targets [mean_density, mean_tensile, mean_efrf, ...]
-    Returns density, tensile, efrf after shrinkage (disintegration/dissolution untouched).
-    """
     density, tensile, efrf = pred[..., 0], pred[..., 1], pred[..., 2]
     ood_z = np.abs(pop_scaled)
     ood_raw = np.clip(ood_z - 2.0, 0, None).sum(axis=-1)
@@ -368,7 +380,6 @@ class HybridTabletModel(nn.Module):
             return self.forward(x).numpy()
 
     def predict_with_uncertainty(self, x, n_samples=20):
-        """MC-Dropout for uncertainty."""
         self.train()
         with torch.no_grad():
             if not torch.is_tensor(x):
@@ -408,7 +419,6 @@ def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
     pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
     speed = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
     granule = rng.uniform(GRANULE_MIN, GRANULE_MAX, n_samples)
-    # Column order: API, Binder, PVPP, MgSt, MCC, Moisture, Pressure, Speed
     X_raw = np.column_stack([api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n, pressure, speed])
     # Generate targets using physical relationships
     porosity0 = 0.45 - 0.001 * (pressure - PRESSURE_MIN) - 0.01 * (binder_n - 3.0)
@@ -444,7 +454,7 @@ class InputScaler:
         return (X - self.mean_) / self.std_
 
 # ================================================================
-# PDF REPORT GENERATION (UPDATED)
+# PDF REPORT GENERATION (with 3D Pareto plot embedded)
 # ================================================================
 def sanitize_text(text):
     replacements = {'σ': 'sigma', 'µ': 'um', '≥': '>=', '≤': '<=',
@@ -455,14 +465,27 @@ def sanitize_text(text):
 
 def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, speed, granule,
                              density, tensile, efrf, disintegration, dissolution, status, timestamp,
-                             model_comparison_df=None, loss_history=None, golden_solution=None):
+                             model_comparison_df=None, loss_history=None, golden_solution=None,
+                             pareto_solutions=None):
     """
-    Generate a comprehensive PDF report. Now includes disintegration/dissolution and Golden Solution.
-    FIXED: uses correct loss_history keys ('loss', 'data', 'physics').
+    Generate a comprehensive PDF report.
+    Includes:
+      - Formulation summary
+      - Process parameters
+      - Prediction results (with thresholds)
+      - Overall status (PASS/FAIL)
+      - Golden Solution details
+      - Model comparison (if provided)
+      - Training loss summary
+      - Recommendations
+      - Contact info
+      - 2D Pareto front (if solutions provided)
+      - 3D Pareto front (if solutions provided) – saved as image
     """
     pdf = FPDF()
     pdf.add_page()
 
+    # --- Header (University branding) ---
     pdf.set_font("Arial", "B", 18)
     pdf.cell(0, 10, sanitize_text("Formulation Optimization Report"), ln=True, align="C")
     pdf.set_font("Arial", "I", 11)
@@ -479,7 +502,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
     pdf.cell(0, 6, "Nile Valley University, Postgraduate College, Sudan", ln=True, align="C")
     pdf.ln(5)
 
-    # Formulation Summary
+    # 1. Formulation Summary
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("1. Formulation Summary"), ln=True, fill=True)
@@ -493,12 +516,10 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
                   ("MCC", f"{mcc:.1f}%", "Filler/Binder"),
                   ("Moisture", f"{moisture:.1f}%", "Residual Moisture"),
                   ("TOTAL", f"{total:.1f}%", "100% Complete")]
-
     pdf.set_font("Arial", "B", 10)
     pdf.cell(40, 6, sanitize_text("Component"), 1, 0, "C")
     pdf.cell(30, 6, sanitize_text("Value"), 1, 0, "C")
     pdf.cell(80, 6, sanitize_text("Function"), 1, 1, "C")
-
     pdf.set_font("Arial", "", 10)
     for comp, val, func in components:
         pdf.cell(40, 6, sanitize_text(comp), 1, 0, "L")
@@ -506,43 +527,37 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
         pdf.cell(80, 6, sanitize_text(func), 1, 1, "L")
     pdf.ln(4)
 
-    # Process Parameters
+    # 2. Process Parameters
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("2. Process Parameters"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
-
     params = [("Compaction Pressure", f"{pressure:.1f} MPa"),
               ("Tableting Speed", f"{speed:.1f} rpm"),
               ("Granule Size", f"{granule:.1f} µm")]
-
     pdf.set_font("Arial", "B", 10)
     pdf.cell(60, 6, sanitize_text("Parameter"), 1, 0, "C")
     pdf.cell(60, 6, sanitize_text("Value"), 1, 1, "C")
-
     pdf.set_font("Arial", "", 10)
     for p, v in params:
         pdf.cell(60, 6, sanitize_text(p), 1, 0, "L")
         pdf.cell(60, 6, sanitize_text(v), 1, 1, "C")
     pdf.ln(4)
 
-    # Prediction Results (now includes disintegration and dissolution)
+    # 3. Prediction Results
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("3. Prediction Results"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
-
     results = [("Density", f"{density:.3f}", "-"),
                ("Tensile Strength", f"{tensile:.3f} MPa", f">= 1.90 MPa"),
                ("EFRF", f"{efrf:.4f}", f"< 0.40"),
                ("Disintegration Time", f"{disintegration:.1f} min", "≤ 15.0 min"),
                ("Dissolution", f"{dissolution:.1f} %", "≥ 80.0 %")]
-
     pdf.set_font("Arial", "B", 10)
     pdf.cell(45, 6, sanitize_text("Metric"), 1, 0, "C")
     pdf.cell(35, 6, sanitize_text("Value"), 1, 0, "C")
     pdf.cell(45, 6, sanitize_text("Threshold"), 1, 1, "C")
-
     pdf.set_font("Arial", "", 10)
     for r in results:
         pdf.cell(45, 6, sanitize_text(r[0]), 1, 0, "L")
@@ -550,21 +565,24 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
         pdf.cell(45, 6, sanitize_text(r[2]), 1, 1, "C")
     pdf.ln(4)
 
-    # Overall Status
+    # 4. Overall Status (coloured)
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
     pdf.cell(0, 8, sanitize_text("4. Overall Status"), ln=True, fill=True)
     pdf.set_font("Arial", "B", 14)
     if status == "PASS":
         pdf.set_text_color(0, 128, 0)
-        pdf.cell(0, 8, sanitize_text("PASS - Formulation Satisfies All Constraints"), ln=True, align="C")
+        pdf.set_fill_color(235, 251, 238)
+        pdf.cell(0, 8, sanitize_text("PASS - Formulation Satisfies All Constraints"), ln=True, align="C", fill=True)
     else:
         pdf.set_text_color(255, 0, 0)
-        pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C")
+        pdf.set_fill_color(255, 245, 245)
+        pdf.cell(0, 8, sanitize_text("FAIL - Formulation Does NOT Satisfy All Constraints"), ln=True, align="C", fill=True)
     pdf.set_text_color(0, 0, 0)
+    pdf.set_fill_color(255, 255, 255)
     pdf.ln(4)
 
-    # Golden Solution (if provided)
+    # 4a. Golden Solution (if provided)
     if golden_solution:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
@@ -582,20 +600,18 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
         pdf.cell(0, 6, f"Quality Score: {golden_solution.get('Quality Score', 0):.1f}%", ln=True)
         pdf.ln(4)
 
-    # Model Comparison (if available)
+    # 5. Model Comparison (if available)
     if model_comparison_df is not None and not model_comparison_df.empty:
         pdf.set_font("Arial", "B", 13)
         pdf.set_fill_color(230, 230, 230)
         pdf.cell(0, 8, sanitize_text("5. Model Performance Comparison"), ln=True, fill=True)
         pdf.set_font("Arial", "", 10)
-
         pdf.set_font("Arial", "B", 10)
         pdf.cell(40, 6, sanitize_text("Model"), 1, 0, "C")
         pdf.cell(30, 6, sanitize_text("R²"), 1, 0, "C")
         pdf.cell(30, 6, sanitize_text("RMSE"), 1, 0, "C")
         pdf.cell(30, 6, sanitize_text("MAE"), 1, 0, "C")
         pdf.cell(40, 6, sanitize_text("Physics"), 1, 1, "C")
-
         pdf.set_font("Arial", "", 10)
         for _, row in model_comparison_df.iterrows():
             pdf.cell(40, 6, sanitize_text(str(row['Model'])), 1, 0, "L")
@@ -605,7 +621,7 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
             pdf.cell(40, 6, sanitize_text(str(row['Physics'])), 1, 1, "C")
         pdf.ln(4)
 
-    # Training Loss Summary (FIXED: use correct keys)
+    # 6. Training Loss Summary
     if loss_history:
         train_losses = loss_history.get('loss', [])
         data_losses = loss_history.get('data', [])
@@ -622,12 +638,95 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
                 pdf.cell(0, 6, f"Final Physics Loss: {physics_losses[-1]:.6f}", ln=True)
             pdf.ln(4)
 
-    # Recommendations
+    # 7. Pareto Front plots (2D and 3D)
+    if pareto_solutions and len(pareto_solutions) > 0:
+        try:
+            # ---- 2D Pareto (API vs EFRF) ----
+            api_vals = [s['API (%)'] for s in pareto_solutions]
+            efrf_vals = [s['EFRF'] for s in pareto_solutions]
+            fig2d = go.Figure()
+            fig2d.add_trace(go.Scatter(
+                x=api_vals, y=efrf_vals,
+                mode='markers+lines',
+                name='Pareto Solutions',
+                marker=dict(size=6, color='#2f9e44'),
+                line=dict(color='#2f9e44', width=2)
+            ))
+            if golden_solution:
+                fig2d.add_trace(go.Scatter(
+                    x=[golden_solution['API (%)']], y=[golden_solution['EFRF']],
+                    mode='markers',
+                    name='Golden Solution',
+                    marker=dict(size=12, color='#FFD700', symbol='star',
+                                line=dict(width=1.5, color='#8a6d00'))
+                ))
+            fig2d.update_layout(
+                title='Pareto Front (API vs EFRF)',
+                xaxis_title='API (%)',
+                yaxis_title='EFRF',
+                template='plotly_white',
+                font=dict(family="Inter, Segoe UI", size=12, color="#333333"),
+                height=400
+            )
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                fig2d.write_image(tmp.name, width=600, height=400)
+                tmp_path = tmp.name
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 13)
+            pdf.cell(0, 10, "7a. Pareto Front (API vs EFRF)", ln=True)
+            pdf.image(tmp_path, x=10, y=None, w=190)
+            os.unlink(tmp_path)
+
+            # ---- 3D Pareto (API vs Tensile vs EFRF) ----
+            tensile_vals = [s['Tensile (MPa)'] for s in pareto_solutions]
+            fig3d = go.Figure()
+            fig3d.add_trace(go.Scatter3d(
+                x=api_vals, y=tensile_vals, z=efrf_vals,
+                mode='markers',
+                marker=dict(size=5, color='#2f9e44'),
+                name='Pareto Solutions'
+            ))
+            if golden_solution:
+                fig3d.add_trace(go.Scatter3d(
+                    x=[golden_solution['API (%)']],
+                    y=[golden_solution['Tensile (MPa)']],
+                    z=[golden_solution['EFRF']],
+                    mode='markers',
+                    marker=dict(size=10, color='#FFD700', symbol='star'),
+                    name='Golden Solution'
+                ))
+            fig3d.update_layout(
+                title='3D Pareto Front (API vs Tensile vs EFRF)',
+                scene=dict(
+                    xaxis_title='API (%)',
+                    yaxis_title='Tensile (MPa)',
+                    zaxis_title='EFRF',
+                    bgcolor='#ffffff',
+                    xaxis=dict(gridcolor='#eceef2'),
+                    yaxis=dict(gridcolor='#eceef2'),
+                    zaxis=dict(gridcolor='#eceef2')
+                ),
+                template='plotly_white',
+                font=dict(family="Inter, Segoe UI", size=12, color="#333333"),
+                height=500
+            )
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                fig3d.write_image(tmp.name, width=600, height=500)
+                tmp_path = tmp.name
+            pdf.add_page()
+            pdf.set_font("Arial", "B", 13)
+            pdf.cell(0, 10, "7b. 3D Pareto Front (API vs Tensile vs EFRF)", ln=True)
+            pdf.image(tmp_path, x=10, y=None, w=190)
+            os.unlink(tmp_path)
+        except Exception as e:
+            # If plot export fails, continue
+            pass
+
+    # 8. Recommendations
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("7. Recommendations"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("8. Recommendations"), ln=True, fill=True)
     pdf.set_font("Arial", "", 10)
-
     if status == "PASS":
         recs = ["1. Proceed with experimental validation.",
                 "2. Confirm tensile strength with physical testing.",
@@ -640,15 +739,14 @@ def generate_full_pdf_report(api, mcc, pvpp, mgst, binder, moisture, pressure, s
                 "3. Increase compaction pressure.",
                 "4. Reduce punch speed.",
                 "5. Re-run with adjusted parameters."]
-
     for rec in recs:
         pdf.cell(0, 6, sanitize_text(rec), ln=True)
     pdf.ln(4)
 
-    # Contact Info
+    # 9. Contact Info
     pdf.set_font("Arial", "B", 13)
     pdf.set_fill_color(230, 230, 230)
-    pdf.cell(0, 8, sanitize_text("8. Contact Information"), ln=True, fill=True)
+    pdf.cell(0, 8, sanitize_text("9. Contact Information"), ln=True, fill=True)
     pdf.set_font("Arial", "", 11)
     pdf.cell(0, 8, "Chem. Eng. Babuker A. Abdalla, PhD Researcher", ln=True)
     pdf.cell(0, 7, "Email: babuker@protonmail.com", ln=True)
@@ -720,7 +818,6 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
         data_source = 'synthetic'
         st.session_state.data_source = 'synthetic'
 
-    # Add interaction features
     X_aug = add_interaction_features(X_raw)
     scaler = InputScaler().fit(X_aug)
     X_scaled = scaler.transform(X_aug)
@@ -734,7 +831,6 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
     X_val_t = torch.tensor(X_scaled[val_idx], dtype=torch.float32)
     y_val_t = torch.tensor(y[val_idx], dtype=torch.float32)
 
-    # Physics variables (raw unscaled)
     pressure_train_t = torch.tensor(X_raw[train_idx, 6], dtype=torch.float32)
     binder_train_t = torch.tensor(X_raw[train_idx, 1], dtype=torch.float32)
     mcc_train_t = torch.tensor(X_raw[train_idx, 4], dtype=torch.float32)
@@ -751,12 +847,11 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
 
     loss_fn = weighted_mse
     history = {'loss': [], 'r2': [], 'rmse': [], 'data_source': data_source,
-               'data': [], 'physics': []}  # for PDF report
+               'data': [], 'physics': []}
     best_val_loss = np.inf
     best_state = None
     patience, patience_counter = 60, 0
 
-    # Define physics functions
     def calculate_heckel_density_torch(pressure, binder):
         porosity0 = 0.45 - 0.001 * (pressure - PRESSURE_MIN) - 0.01 * (binder - 3.0)
         return torch.clamp(1.0 - porosity0 * torch.exp(-0.01 * (pressure - PRESSURE_MIN)), 0.55, 0.95)
@@ -766,18 +861,12 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
         optimizer.zero_grad()
         pred = model(X_train_t)
 
-        # Data loss
         data_loss = loss_fn(pred, y_train_t)
 
-        # ---- Physics losses ----
-        # 1. Heckel residual
         physical_density = calculate_heckel_density_torch(pressure_train_t, binder_train_t)
         heckel_loss = torch.mean((pred[:, 0] - physical_density) ** 2)
-
-        # 2. EFRF constraint (explicit)
         efrf_constraint = torch.mean(torch.relu(pred[:, 2] - 0.40) ** 2)
 
-        # 3. Monotonicity: ∂D/∂P > 0 (compute gradient every 10 epochs)
         if epoch % 10 == 0:
             X_train_t.requires_grad_(True)
             pred_grad = model(X_train_t)
@@ -788,28 +877,21 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
                 grad_outputs=torch.ones_like(density_grad),
                 create_graph=True, retain_graph=True
             )[0]
-            # Correct index: pressure is column 6 in the augmented input (first 8 are original)
             grad_pressure = grad_density[:, 6]
             monotonic_loss = torch.mean(torch.relu(-grad_pressure) ** 2)
             X_train_t.requires_grad_(False)
         else:
             monotonic_loss = torch.tensor(0.0, device=X_train_t.device)
 
-        # 4. Boundary constraints
         mask_low = (pressure_train_t < 120).float()
         mask_high = (pressure_train_t > 230).float()
         boundary_loss = (
             torch.mean(mask_low * torch.relu(0.5 - pred[:, 0]) ** 2) +
             torch.mean(mask_high * torch.relu(pred[:, 0] - 0.98) ** 2)
         )
-
-        # 5. MCC penalty
         mcc_penalty = torch.mean(torch.relu(mcc_train_t - MCC_MAX) ** 2)
-
-        # 6. Density penalty
         density_penalty = torch.mean(torch.relu(pred[:, 0] - 0.99) ** 2)
 
-        # Combine physics losses
         physics_loss = (heckel_loss * PHYSICS_LOSS_WEIGHT +
                         efrf_constraint * EFRF_CONSTRAINT_WEIGHT +
                         monotonic_loss * MONOTONICITY_WEIGHT +
@@ -822,7 +904,6 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
-        # Validation
         model.eval()
         with torch.no_grad():
             val_pred = model(X_val_t)
@@ -838,7 +919,6 @@ def train_model(use_real=False, _real_df=None, data_fingerprint=None):
             history['loss'].append(val_loss)
             history['r2'].append(val_r2)
             history['rmse'].append(val_rmse)
-            # Log data and physics loss components (for PDF)
             history['data'].append(data_loss.item())
             history['physics'].append(physics_loss.item())
 
@@ -912,7 +992,6 @@ class NSGAIIOptimizer:
         return balanced
 
     def evaluate(self, pop):
-        # Add interaction features
         pop_aug = np.array([add_interaction_features(row.reshape(1, -1))[0] for row in pop])
         pop_scaled = self.scaler.transform(pop_aug)
         with torch.no_grad():
@@ -1091,7 +1170,6 @@ def perform_sensitivity_analysis(model, scaler, ref_solution):
         return None
 
 def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
-    # Use unified color scale
     fig = go.Figure(data=[go.Scatter3d(
         x=pop[:, 0], y=obj[:, 2], z=-obj[:, 1],
         mode='markers',
@@ -1225,11 +1303,11 @@ def get_current_formulation_results(return_std=False):
         'disintegration': float(pred[3]), 'dissolution': float(pred[4])
     }
     if return_std and std is not None:
-        result['std'] = std.tolist()  # [std_density, std_tensile, std_efrf, std_disint, std_dissol]
+        result['std'] = std.tolist()
     return result
 
 # ================================================================
-# DASHBOARD (inside an expander, loss curve restored, with unique keys)
+# DASHBOARD (inside an expander, loss curve restored, unique keys)
 # ================================================================
 def render_dashboard():
     with st.expander("📊 Dashboard Panel (Training & Optimization Status)", expanded=False):
@@ -1243,7 +1321,7 @@ def render_dashboard():
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.markdown("### 🧠 Training Status")
+            st.markdown('<div class="dashboard-title"><i style="color:#667eea;">🧠</i> Training Status</div>', unsafe_allow_html=True)
             if history and len(history.get('loss', [])) > 0:
                 total_loss = history['loss'][-1] if history['loss'] else None
                 data_loss = history.get('data', [None])[-1] if history.get('data') else None
@@ -1257,7 +1335,7 @@ def render_dashboard():
                 st.info("No training data yet. Run optimisation first.")
 
         with col2:
-            st.markdown("### ⚙️ Optimisation Status")
+            st.markdown('<div class="dashboard-title"><i style="color:#764ba2;">⚙️</i> Optimisation Status</div>', unsafe_allow_html=True)
             if gen_history:
                 generations = len(gen_history)
                 pareto_count = len(solutions) if solutions else 0
@@ -1274,7 +1352,7 @@ def render_dashboard():
                 st.metric("⏱️ Runtime", f"{runtime:.1f}s")
 
         with col3:
-            st.markdown("### 📥 Quick Reports")
+            st.markdown('<div class="dashboard-title"><i style="color:#2f9e44;">📥</i> Quick Reports</div>', unsafe_allow_html=True)
             if opt_complete and solutions:
                 df = pd.DataFrame(solutions)
                 csv = df.to_csv(index=False)
@@ -1305,11 +1383,10 @@ def render_dashboard():
             else:
                 st.caption("Run optimisation to enable downloads.")
 
-        # ---- Loss Curve (restored, with unique key) ----
+        # ---- Loss Curve (restored) ----
         if history and len(history.get('loss', [])) > 1:
             st.subheader("📉 Loss Curve")
             fig_loss = go.Figure()
-            # Training Loss (validation loss)
             fig_loss.add_trace(go.Scatter(
                 y=history['loss'],
                 mode='lines+markers',
@@ -1317,7 +1394,6 @@ def render_dashboard():
                 line=dict(color='#667eea', width=2),
                 marker=dict(color='#667eea', size=4)
             ))
-            # Physics Loss (if available)
             if 'physics' in history and len(history['physics']) > 1:
                 fig_loss.add_trace(go.Scatter(
                     y=history['physics'],
@@ -1335,10 +1411,9 @@ def render_dashboard():
                 paper_bgcolor='#ffffff',
                 font=dict(family="Inter, Segoe UI, sans-serif", size=12, color="#333333")
             )
-            # Use a unique key to avoid duplicate ID
             st.plotly_chart(fig_loss, use_container_width=True, key="dashboard_loss_curve")
 
-        # ---- Small Pareto plot (unified palette, unique key) ----
+        # ---- Small Pareto plot (unified palette) ----
         if solutions:
             st.subheader("🌐 Pareto Front (API vs EFRF)")
             api_vals = [s['API (%)'] for s in solutions]
@@ -1693,7 +1768,7 @@ def render_training_progress():
     data_source = history.get('data_source', 'unknown')
     st.info(f"📊 Model trained on: **{data_source.upper()}** data ({history.get('n_samples', '?')} samples)")
 
-    # Loss curve (Training Loss + Physics Loss) – unique key to avoid conflict
+    # Loss curve
     fig_loss = go.Figure()
     fig_loss.add_trace(go.Scatter(
         y=history['loss'],
@@ -1721,7 +1796,7 @@ def render_training_progress():
     )
     st.plotly_chart(fig_loss, use_container_width=True, key="training_loss_curve")
 
-    # R² and RMSE with unified colors
+    # R² and RMSE
     fig_metrics = go.Figure()
     fig_metrics.add_trace(go.Scatter(
         y=history['r2'],
@@ -1766,7 +1841,7 @@ def render_training_progress():
 
 # ================================================================
 # render_pareto_evolution() has been REMOVED.
-# Only 3D Pareto remains.
+# Only 3D Pareto remains in the UI (and both 2D/3D in PDF).
 # ================================================================
 
 def render_golden_solution(golden):
@@ -1990,8 +2065,7 @@ def render_optimization_summary():
 # MAIN ORCHESTRATION
 # ================================================================
 def _render_full_results():
-    # The 2D Pareto evolution slider has been removed.
-    # Only the 3D Pareto front remains.
+    # 3D Pareto UI (no 2D slider)
     with st.expander("🌐 3D Pareto Front (API - EFRF - Tensile)", expanded=False):
         gen_history = st.session_state.get('pareto_history')
         if gen_history:
@@ -2022,7 +2096,6 @@ def _render_full_results():
                               golden['MgSt (%)'], golden['MCC (%)'], golden['Moisture (%)'], 200.0, 20.0])
                 )
                 if sens_data:
-                    # Unified sensitivity bar chart
                     fig_sens = go.Figure()
                     features = list(sens_data.keys())
                     values = list(sens_data.values())
@@ -2051,7 +2124,6 @@ def _render_full_results():
             st.warning("Model, Scaler, or Golden Solution missing for Sensitivity Analysis.")
 
 def _run_optimization(w_api, w_quality):
-    # Reset dashboard rendered flag
     st.session_state.dashboard_rendered = False
 
     start_time = time.time()
@@ -2077,9 +2149,8 @@ def _run_optimization(w_api, w_quality):
     nsga_elapsed = round(time.time() - nsga_start, 1)
     opt_progress.empty()
 
-    # Get current formulation results with uncertainty
     results_with_std = get_current_formulation_results(return_std=True)
-    st.session_state.results = results_with_std  # store dict with std
+    st.session_state.results = results_with_std
     st.session_state.pareto_history = gen_history
     st.session_state.runtime = round(time.time() - start_time, 1)
     st.session_state.train_time = train_elapsed
@@ -2115,7 +2186,6 @@ def _run_optimization(w_api, w_quality):
                f"(train/load: {train_elapsed}s, NSGA-II: {nsga_elapsed}s).")
     st.balloons()
 
-    # Show dashboard immediately (first run)
     render_dashboard()
     st.session_state.dashboard_rendered = True
     _render_full_results()
@@ -2126,7 +2196,6 @@ def main():
     render_header()
     st.write("")
 
-    # Three tabs: Formulate, Optimize & Results, Report
     tab_formulate, tab_optimize, tab_report = st.tabs(["🧪 Formulate", "🚀 Optimize & Results", "📄 Report"])
 
     with tab_formulate:
@@ -2159,7 +2228,6 @@ def main():
         if run_button:
             _run_optimization(w_api, w_quality)
         elif st.session_state.optimization_complete and st.session_state.results:
-            # Only render dashboard if not already rendered in this session
             if not st.session_state.get('dashboard_rendered', False):
                 render_dashboard()
                 st.session_state.dashboard_rendered = True
@@ -2186,7 +2254,6 @@ def main():
     with tab_report:
         st.markdown("## 📄 Full PDF Report")
         if st.session_state.optimization_complete and st.session_state.results:
-            # Gather data for PDF
             results = st.session_state.results
             golden = st.session_state.get('golden_solution')
             history = st.session_state.get('_trained_history')
@@ -2194,7 +2261,6 @@ def main():
             status = "PASS" if (results['tensile'] >= 1.90 and results['efrf'] < 0.40) else "FAIL"
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # Generate PDF
             pdf_data = generate_full_pdf_report(
                 api=st.session_state.api,
                 mcc=st.session_state.mcc,
@@ -2212,9 +2278,10 @@ def main():
                 dissolution=results['dissolution'],
                 status=status,
                 timestamp=timestamp,
-                model_comparison_df=None,  # can be added later
+                model_comparison_df=None,
                 loss_history=history,
-                golden_solution=golden
+                golden_solution=golden,
+                pareto_solutions=solutions
             )
 
             st.download_button(
